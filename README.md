@@ -158,5 +158,5 @@ work correctly.
 
 ## GitHub
 
-[Solar12vUPS GitHub Repository](git@github.com:stuartlynne/solar12vups.git)
+[https://github.com/stuartlynne/solar12vups.git](https://github.com/stuartlynne/solar12vups.git)
 
