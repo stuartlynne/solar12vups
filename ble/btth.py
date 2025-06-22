@@ -121,6 +121,7 @@ class BtThBleakClient(BleakClientEx):
             await self.read_registers('start')
         except Exception as e:
             logging.exception(f"Exception in BtTh.start: {e}")
+            print(traceback.format_exc(), file=sys.stderr)
 
 
     async def notification(self, characteristic, data, ):
@@ -211,9 +212,11 @@ class BtThBleakClient(BleakClientEx):
         index = self.registers_index
 
         name = self.registers[index]['name']
-        #logging.info(f"read_registers[{msg}:{index}] {name} first: {self.registers_first} old: {old_index} {self.registers[index]['register']:04x}:{self.registers[index]['words']}")
+        logging.info(f"read_registers[{msg}:{index}] {name} first: {self.registers_first} old: {old_index} {self.registers[index]['register']:04x}:{self.registers[index]['words']}")
         request = self.create_generic_read_request(self.device_id, 3, self.registers[index]['register'], self.registers[index]['words']) 
-        await self.write_gatt_char(self.BT_TH_WRITE, request, )
+        logging.info(f"request:{request}")
+
+        await self.write_gatt_char(self.BT_TH_WRITE, bytes(request), )
 
 
     def create_generic_read_request(self, device_id, function, regAddr, readWrd):
@@ -565,7 +568,7 @@ class BtThBleakClient(BleakClientEx):
             xreport('BtThBleakClient', self.device_name, f"set_register: {register:04x} {value}", yellow=True)
             #logging.info(f"set_register: {register:04x} {value}")
             request = self.create_generic_read_request(self.device_id, 6, register, value)
-            await self.write_gatt_char(self.BT_TH_WRITE, request, )
+            await self.write_gatt_char(self.BT_TH_WRITE, bytes(request), )
             #logging.info(f"set_register: {[hex(v) for v in request]} {value}")
             #asyncio.create_task(self.ble_manager.characteristic_write_value(request))
         except Exception as e:
