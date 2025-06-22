@@ -9,8 +9,6 @@ import logging
 from lib.log import setup_logger, xreport
 logger = logging.getLogger(__name__)
 
-
-
 class PowerState (Enum):
     noPV_noBattery = 0        # No PV, no Battery, no Load           pvps_v==0 and load_a==0
     noPV_noCharging_noLoad = 1   # No PV, Battery no Load                pvps v==0 and load_a==0               
@@ -20,6 +18,16 @@ class PowerState (Enum):
     PV_Charging_Load = 4        # PV charging Battery and powering Load pvps_v!=0 and pvps_a<=load_a
     PV_Split_Load = 5           # PV and Battery are powering Load      pvps_v!=0 and load_a!=0 pvps_a==load_a
     UNKNOWN = 6 
+
+PowerStateInfo = {
+    PowerState.noPV_noBattery:          "No PV/PS, no Battery, no Load",
+    PowerState.noPV_noCharging_noLoad:  "No PV/PS, Battery no Load",
+    PowerState.PV_Charging_noLoad:      "PV/PS charging Battery, no Load",
+    PowerState.noPV_Discharging_Load:   "No PV/PS, Battery powering load", 
+    PowerState.PV_Charging_Load:        "PV/PS charging Battery and powering Load", 
+    PowerState.PV_Split_Load:           "PV/PS and Battery are powering Load",
+    PowerState.UNKNOWN:                 "Unknown Power State", 
+}
 
 PowerStateHelp = {
        PowerState.noPV_noBattery:          ("No PV/PS ", "Battery",            "Load off", "pvps_v==0 and load_a==0",),

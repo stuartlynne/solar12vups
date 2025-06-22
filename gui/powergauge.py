@@ -20,7 +20,7 @@ import tabulate
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from gui.powerstate import PowerState, PowerStateHelp, LiFePo4, Power
+from gui.powerstate import PowerState, PowerStateHelp, LiFePo4, Power, PowerStateInfo
 from gui.tooltip import ToolTipManager
 
 
@@ -350,8 +350,9 @@ class PowerGaugeTab:
             voltage = self.power.load.load_v
             power_w = self.power.load.load_w
             load_a = self.power.load.load_a
-            self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold', 
+            text = self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold', 
                          color='red' if self.power.load.from_batt_w else 'green',)
+            self.tooltip.add_tip_artist(text, f"Total Load power being used: {power_w:0.1f}W\nGreen if no battery power, Red if battery power used.", )
             #self.tooltip.add_tip_artist(block_patch, 'BBBB',)
             if load_a:
                 percentage = LiFePo4.estPercent(self.power.batt.batt_v,)
@@ -369,9 +370,10 @@ class PowerGaugeTab:
         if gaugeType == Gaugetype.Battery:
             voltage = self.power.batt.batt_v
             power_w = self.power.batt.batt_w
-            self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold',
+            text = self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold',
                          color='red' if self.power.batt.to_load_w else 'green',
                          )
+            self.tooltip.add_tip_artist(text, f"Total Battery power: {power_w:0.1f}W\nGreen if charging, Red if discharging.", )
             if voltage >= 13.3:
                 bg_color = '#ccffcc'  # light green
             elif voltage >= 13.0:
@@ -414,9 +416,10 @@ class PowerGaugeTab:
         if gaugeType == Gaugetype.PVPS:
             voltage = self.power.pvps.pvps_v
             power_w = self.power.pvps.pvps_w
-            self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold',
+            text = self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold',
                          color = 'red' if not self.power.pvps.to_batt_w else 'green' ,
                          )
+            self.tooltip.add_tip_artist(text, f"Total PVPS power being supplied: {power_w:0.1f}W", )
             bar1_v = znone(self.power.pvps.pvps_v)
             bar2_w = znone(self.power.pvps.to_load_w)
             bar3_w = znone(self.power.pvps.to_batt_w)
@@ -543,7 +546,11 @@ class PowerGaugeTab:
         powerState = self.getPowerState(data_history)
         info = PowerStateHelp.get(powerState, ())
         joined = " | ".join(info[:-1])
-        self.ax.text(-0.15, -0.05, f"Inferred Power State: {powerState.name}", ha='left', va='bottom', fontsize=10, weight='bold')
+        text = self.ax.text(-0.15, -0.05, f"Inferred Power State: {powerState.name}", ha='left', va='bottom', fontsize=10, weight='bold')
+        powerinfo = [(p.name, PowerStateInfo[p]) for p in PowerState]                            
+        table = tabulate.tabulate(powerinfo, headers=["PowerState", "Description"], tablefmt="grid")
+
+        self.tooltip.add_tip_artist(text, table, fixedFont=True)
 
         # Save the bounding box for interaction check
         self.ax.set_xlim(-1, 7)
@@ -569,8 +576,8 @@ class PowerGaugeTab:
         self.ax.text(x + w / 2, y, "\u2716", ha='center', va='bottom', fontsize=6, weight='bold')
 
         # Last time string
-        #self.lastTimeText = self.ax.text(4.70, 0.128, f"{date_str}", ha='left', va='bottom', fontsize=11, weight='bold')
         self.lastTimeText = self.ax.text(4.20, 2.078, f"{date_str}", ha='left', va='bottom', fontsize=10, weight='bold')
+        self.tooltip.add_tip_artist(self.lastTimeText, "Last update time")
 
         self.capacity_button_list = {
                 'capacity_down':  { 'arrow': '\u25BC', 'bounds': [5.20, 0.022, .08, .08], 'active': 'battery_capacity', 'up': False, },

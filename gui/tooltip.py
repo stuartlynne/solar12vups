@@ -20,7 +20,7 @@ class ToolTipManager:
         self.mpl_canvas.mpl_connect("motion_notify_event", self._on_motion)
         logging.info('ToolTipManager initialized with canvas_widget: %s, mpl_canvas: %s, ax: %s',)
 
-    def add_tip_box(self, bounds, text):
+    def add_tip_box(self, bounds, text, fixedFont=False):
         """
         Add tooltip using [x, y, w, h] in data coordinates
         """
@@ -30,9 +30,9 @@ class ToolTipManager:
                 return False
             x, y, w, h = bounds
             return x <= event.xdata <= x + w and y <= event.ydata <= y + h
-        self.tooltips.append((test, text))
+        self.tooltips.append((test, text, fixedFont))
 
-    def add_tip_artist(self, artist, text):
+    def add_tip_artist(self, artist, text, fixedFont=False):
         """
         Add tooltip for a matplotlib artist (e.g., Patch, Line2D)
         """
@@ -41,21 +41,21 @@ class ToolTipManager:
                 return False
             contains, _ = artist.contains(event)
             return contains
-        self.tooltips.append((test, text))
+        self.tooltips.append((test, text, fixedFont))
 
     def clear_tips(self):
         self.tooltips.clear()
 
 
     def _on_motion(self, event):
-        for test, text in self.tooltips:
+        for test, text, fixedFont in self.tooltips:
             if test(event):
                 if not self.tooltip_window or self.current_text != text:
-                    self._show_tooltip(event, text)
+                    self._show_tooltip(event, text, fixedFont=fixedFont)
                 return
         self._hide_tooltip()
 
-    def _show_tooltip(self, event, text):
+    def _show_tooltip(self, event, text, fixedFont=False):
         self._hide_tooltip()  # In case one is still visible
         self.current_text = text
 
@@ -68,7 +68,7 @@ class ToolTipManager:
         tw.wm_geometry(f"+{pointer_x + 10}+{pointer_y + 10}")
 
         label = tk.Label(tw, text=text, background="yellow", relief="solid", borderwidth=1,
-                         font=("Arial", 9))
+                         font=("Arial", 9) if not fixedFont else ("Courier", 9))
         label.pack()
 
         tw.lift()
