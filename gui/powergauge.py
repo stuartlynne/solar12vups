@@ -239,6 +239,8 @@ class PowerGaugeTab:
                     if x <= event.xdata <= x + w and y <= event.ydata <= y + h:
                         xreport(self.device_name, 'PowerGauge', 'Close button clicked', grey=True, )
                         # User clicked close button!
+                        #self.tooltip.clear_tips()
+                        self.tooltip._hide_tooltip()
                         self.close_callback()
                     else:
                         logging.info("PowerGauge:on_click: outside close button bounds, not closing tab")
