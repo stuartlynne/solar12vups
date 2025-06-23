@@ -158,5 +158,6 @@ work correctly.
 
 ## GitHub
 
-[https://github.com/stuartlynne/solar12vups.git](https://github.com/stuartlynne/solar12vups.git)
+- [https://github.com/stuartlynne/solar12vups.git](https://github.com/stuartlynne/solar12vups.git)
+- [Powerstate Readme](https://github.com/stuartlynne/README-Powerstate.md)
 
