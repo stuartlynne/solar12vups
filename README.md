@@ -4,7 +4,7 @@ The *Solar12VUPS* monitor is a Python TKinter application that monitors the stat
 *Renogy Wanderer 10A PWM Charge Controllers* with the *Renogy BT-1 Bluetooth Module*.
 
 The Solar12VUPS hardware and application was designed to provide a reliable power source for
-low power devices that can run off 12V or via buck converters 5V and 24V. 
+Low-power devices that can run off 12V or via buck converters at 5V and 24V. 
 
 My specific use case is to monitor the status of multiple 12Vdc UPS implemented with a 
 *Renogy Wanderer 10A PWM Charge Controller* and *Eco-Worthy 8Ah LiFePO4 Batteries*.
