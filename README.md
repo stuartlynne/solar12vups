@@ -159,5 +159,8 @@ work correctly.
 ## GitHub
 
 - [https://github.com/stuartlynne/solar12vups.git](https://github.com/stuartlynne/solar12vups.git)
-- [Powerstate Readme](https://github.com/stuartlynne/README-Powerstate.md)
+- [README-Powerstate](README-Powerstate.md)
+- [README-Bleak-Linux](README-Bleak-Linux.md)
+- [README-BT1](README-BT1.md)
+- 
 
