@@ -3,6 +3,17 @@
 The *Solar12VUPS* monitor is a Python TKinter application that monitors the status of one or more 
 *Renogy Wanderer 10A PWM Charge Controllers* with the *Renogy BT-1 Bluetooth Module*.
 
+It displays the status of the power source, battery and load. The application can turn the load on and off,
+and provide an estimate of the runtime based on the current load and battery state of charge (SoC),
+
+- ![solar1](images/solar1.png)
+- ![solar2](images/solar2.png)
+- ![solar3](images/solar3.png)
+
+
+
+## Use Case
+
 The Solar12VUPS hardware and application was designed to provide a reliable power source for
 Low-power devices that can run off 12V or via buck converters at 5V and 24V. 
 
