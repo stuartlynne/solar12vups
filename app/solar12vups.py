@@ -403,6 +403,7 @@ def join(target_thread=None, count=0):
 
 def SolarMain():
 
+    print('Solar12VUPS SolarMain starting...', file=sys.stderr)
     activeJSON = ActiveJSON(activepath='~/solarups_active.json', )
     active = activeJSON.load_active()
 
@@ -441,7 +442,13 @@ def SolarMain():
     aevents = AEvents(shutdown, )
     if True:
         root = tk.Tk()
-        root.iconbitmap("favicon.ico")
+        if sys.platform == "win32":
+            root.iconbitmap("favicon.ico")
+        else:
+            icon = tk.PhotoImage(file="favicon-strict.png")
+            root.iconphoto(True, icon)
+        #    root.title("Solar 12V UPS Monitor")
+
         xreport('solar12vups', 'Tkinter', f"Starting SolarMonitorApp ... root: {root}", grey=True, )
         app = SolarMonitorApp(root=root, client=None, controlQueues=controlQueues, aevents=aevents, active=active, shutdownEvent=shutdownEvent)
 
