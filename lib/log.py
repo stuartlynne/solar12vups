@@ -1,9 +1,11 @@
 import logging
 import sys
+import os
 import logging
 from colored import stylize, fore, back, Style
 from colored import stylize, fore, back, style
 from lib.color256_enum import Color256
+import traceback
 
 #print(stylize('Hello, World!', back('yellow')))
 #print(stylize('This is green.', fore('green')))
@@ -19,40 +21,56 @@ from pathlib import Path
 from shutil import move
 
 def setup_logger():
-    log_file = Path("/tmp/STDERR.txt")
 
-    # Manually rotate if the main log exists
-    if log_file.exists():
-        for i in range(3, 0, -1):
-            older = log_file.with_name(f"{log_file.name}.{i}")
-            newer = log_file.with_name(f"{log_file.name}.{i + 1}")
-            if older.exists():
-                if newer.exists():
-                    newer.unlink()
-                move(older, newer)
-        rolled = log_file.with_name(f"{log_file.name}.1")
-        move(log_file, rolled)
+    if os.name == 'nt':
+        log_dir = os.path.join(os.path.expanduser("~"), "Documents", "solar12vups")
+    else:
+        log_dir = os.path.join(os.path.expanduser("~"), "solar12vups")
 
-    #logger = logging.getLogger('xreport')
-    logger = logging.getLogger()
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-    logger.setLevel(logging.INFO)
+    os.makedirs(log_dir, exist_ok=True)
+    print('log_dir', log_dir, file=sys.stderr)
 
-    # Console handler
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(ConsoleColorFormatter(fmt='%(message)s'))
+    log_file = os.path.join(log_dir, "STDERR.txt")
+    print('log_file', log_file, file=sys.stderr)
 
-    # File handler
-    fh = logging.FileHandler(log_file, mode='w')  # Overwrite fresh each time
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(logging.Formatter(fmt='%(asctime)s %(levelname)s %(message)s'))
 
-    logger.addHandler(ch)
-    logger.addHandler(fh)
+    try:
+        # Manually rotate if the main log exists
+        if os.path.isfile(log_file):
+            for i in range(3, 0, -1):
+                older = os.path.join(log_file, f"{log_file}.{i}")
+                newer = os.path.join(log_file, f"{log_file}.{i + 1}")
+                if os.path.isfile(older):
+                    if os.path.isfile(newer):
+                        os.unlink(newer)
+                    os.rename(older, newer)
+            rolled = os.path.join(log_file, f"{log_file}.1")
+            move(log_file, rolled)
 
-    return logger
+        #logger = logging.getLogger('xreport')
+        logger = logging.getLogger()
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+        logger.setLevel(logging.INFO)
+
+        # Console handler
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(ConsoleColorFormatter(fmt='%(message)s'))
+
+        # File handler
+        fh = logging.FileHandler(log_file, mode='w')  # Overwrite fresh each time
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter(fmt='%(asctime)s %(levelname)s %(message)s'))
+
+        logger.addHandler(ch)
+        logger.addHandler(fh)
+
+        return logger
+
+    except Exception as e:
+        print(f"Error setting up logger: {e}", file=sys.stderr)
+        print(traceback.format_exc(), file=sys.stderr)
 
 
 def ansi_256_color(fg=None, bg=None):
