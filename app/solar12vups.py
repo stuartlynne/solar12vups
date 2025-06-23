@@ -441,6 +441,7 @@ def SolarMain():
     aevents = AEvents(shutdown, )
     if True:
         root = tk.Tk()
+        root.iconbitmap("favicon.ico")
         xreport('solar12vups', 'Tkinter', f"Starting SolarMonitorApp ... root: {root}", grey=True, )
         app = SolarMonitorApp(root=root, client=None, controlQueues=controlQueues, aevents=aevents, active=active, shutdownEvent=shutdownEvent)
 
