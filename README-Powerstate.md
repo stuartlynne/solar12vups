@@ -18,15 +18,9 @@ We can infer the power going into or out of the battery by comparing the power f
 
 ## Power State
 
-The Power State is determined by where the power is coming from and where it is going to.
+The Power State is determined by where the power originates and where it is directed.
 
-| -- | -- |
-| ---                         | PV/PS Off   | PV/PS On |
-| Load Off                    | Idle        | Charging |
-| Load less than PV/PS Supply | Discharging | Charging |
-| Load more than PV/PS Supply | Discharging | Discharging |
 
-| ---- | ------- | ----------- | --------------- |
 | Load | Ps/PV   | Battery     | Power State     |
 | ---- | ------- | ----------- | --------------- |
 | Off  | Off     | Idle        | Idle            |
