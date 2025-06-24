@@ -54,7 +54,7 @@ class ToolTipManager:
 
 
     def _on_motion(self, event):
-        for name, (test, text, fixedFont) in self.tooltips.items():
+        for name, (test, text, fixedFont) in list(self.tooltips.items()):
             if test(event):
                 if not self.tooltip_window or self.current_text != text:
                     self._show_tooltip(event, text, fixedFont=fixedFont)
