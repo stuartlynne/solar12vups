@@ -403,7 +403,7 @@ def join(target_thread=None, count=0):
 
 def SolarMain():
 
-    print('Solar12VUPS SolarMain starting...', file=sys.stderr)
+    #print('Solar12VUPS SolarMain starting...', file=sys.stderr)
     activeJSON = ActiveJSON(activepath='~/solarups_active.json', )
     active = activeJSON.load_active()
 

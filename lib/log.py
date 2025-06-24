@@ -20,7 +20,7 @@ class ConsoleColorFormatter(logging.Formatter):
 from pathlib import Path
 from shutil import move
 
-def setup_logger():
+def setup_logger(stderr=False,):
 
     if os.name == 'nt':
         log_dir = os.path.join(os.path.expanduser("~"), "Documents", "solar12vups")
@@ -28,10 +28,10 @@ def setup_logger():
         log_dir = os.path.join(os.path.expanduser("~"), "solar12vups")
 
     os.makedirs(log_dir, exist_ok=True)
-    print('log_dir', log_dir, file=sys.stderr)
+    #print('log_dir', log_dir, file=sys.stderr)
 
     log_file = os.path.join(log_dir, "STDERR.txt")
-    print('log_file', log_file, file=sys.stderr)
+    #print('log_file', log_file, file=sys.stderr)
 
 
     try:
@@ -53,17 +53,18 @@ def setup_logger():
             logger.removeHandler(handler)
         logger.setLevel(logging.INFO)
 
-        # Console handler
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO)
-        ch.setFormatter(ConsoleColorFormatter(fmt='%(message)s'))
+        if stderr:
+            # Console handler
+            ch = logging.StreamHandler()
+            ch.setLevel(logging.INFO)
+            ch.setFormatter(ConsoleColorFormatter(fmt='%(message)s'))
+            logger.addHandler(ch)
 
         # File handler
         fh = logging.FileHandler(log_file, mode='w')  # Overwrite fresh each time
         fh.setLevel(logging.INFO)
         fh.setFormatter(logging.Formatter(fmt='%(asctime)s %(levelname)s %(message)s'))
 
-        logger.addHandler(ch)
         logger.addHandler(fh)
 
         return logger
