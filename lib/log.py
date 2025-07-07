@@ -20,7 +20,7 @@ class ConsoleColorFormatter(logging.Formatter):
 from pathlib import Path
 from shutil import move
 
-def setup_logger(stderr=False,):
+def setup_logger(stderr=False, redirect_std=False):
 
     if os.name == 'nt':
         log_dir = os.path.join(os.path.expanduser("~"), "Documents", "solar12vups")
@@ -66,6 +66,11 @@ def setup_logger(stderr=False,):
         fh.setFormatter(logging.Formatter(fmt='%(asctime)s %(levelname)s %(message)s'))
 
         logger.addHandler(fh)
+
+        # Redirect stdout/stderr to same file
+        if redirect_std:
+            sys.stdout = open(log_file, 'a')
+            sys.stderr = open(log_file, 'a')
 
         return logger
 

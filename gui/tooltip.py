@@ -27,6 +27,8 @@ class ToolTipManager:
         """
         #logging.info('ToolTipmanager.add_tip_box: Adding tooltip box with bounds: %s, text: %s', bounds, text)
         def test(event):
+            if not self.ax.figure:
+                return False
             if event.inaxes != self.ax:
                 return False
             x, y, w, h = bounds
@@ -41,6 +43,8 @@ class ToolTipManager:
         """
         def test(event):
             if event.inaxes != self.ax:
+                return False
+            if artist.figure is None:
                 return False
             contains, _ = artist.contains(event)
             return contains
