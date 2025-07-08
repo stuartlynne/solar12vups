@@ -327,7 +327,7 @@ def blemainthread(name, root=None, app=None, active=None, aevents=None,
     #aevents = AEvents(shutdown, )
     asyncman.run('blemaintask', blemaintask(active=active, shutdown=shutdown, aevents=aevents, controlQueues=controlQueues, dataQueue=dataQueue, argv=argv, ))
 
-    if sys.version_info >= (3, 13): 
+    if False and sys.version_info >= (3, 13): 
         try:
             #while not shutdownEvent.is_set():
             # dataQueue will be ShutDown by the Shutdown handler.
