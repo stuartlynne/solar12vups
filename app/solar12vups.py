@@ -243,7 +243,14 @@ async def blemaintask(active=None, shutdown=None, aevents=None, controlQueues=No
                             await asyncio.sleep(10)  # give the scanner a tick to process
                     scanner_results = []
                     #xreport('blemaintask', 'Restarting', 'Waiting for scanner_control ...', blue=True, )
-                    await scanner.start()
+                    try:
+                        await scanner.start()
+                    except AttributeError as e:
+                        xreport(f"blemaintask: scanner.stop() skipped: {e}", grey=True)
+                    except Exception as e:
+                        logging.exception(f"blemaintask: scanner.stop() exception: {e}")
+
+
 
 
         for name, task in tasks.items():
@@ -320,7 +327,7 @@ def blemainthread(name, root=None, app=None, active=None, aevents=None,
     #aevents = AEvents(shutdown, )
     asyncman.run('blemaintask', blemaintask(active=active, shutdown=shutdown, aevents=aevents, controlQueues=controlQueues, dataQueue=dataQueue, argv=argv, ))
 
-    if sys.version_info >= (3, 13): 
+    if False and sys.version_info >= (3, 13): 
         try:
             #while not shutdownEvent.is_set():
             # dataQueue will be ShutDown by the Shutdown handler.

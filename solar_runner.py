@@ -1,7 +1,15 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+
+"""Convenience wrapper for running bootstrap directly from source tree."""
 import sys
 import argparse
 from lib.log import setup_logger
 from app.solar12vups import SolarMain
+import matplotlib
+matplotlib.use('TkAgg')
+
 
 def main():
     parser = argparse.ArgumentParser(description="Solar12VUPS runner")

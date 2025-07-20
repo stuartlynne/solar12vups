@@ -188,7 +188,7 @@ class PowerGaugeTab:
 
         #logging.info("PowerGauge:_watchdog_tick: elapsed=%.2f color=%s", elapsed, color)
         self.lastTimeText.set_color(color)
-        self.canvas.draw_idle()
+        self.root.after_idle(self.figure.canvas.draw_idle)
 
     def popup_and_get_string(self, prompt="Please enter something"):
         return simpledialog.askstring("Prompt", prompt, parent=self.root)
@@ -227,7 +227,7 @@ class PowerGaugeTab:
                     logging.info("PowerGauge:clear_highlight: Setting load_button_clicked highlight")
                     # reset after 3800ms
                     self.update_gauges()
-                    self.figure.canvas.draw_idle()
+                    self.root.after_idle(self.figure.canvas.draw_idle)
                     if not self._clear_highlight_after_id:
                         self._clear_highlight_after_id = self.root.after(3800, self.clear_highlight)
                 else:
@@ -248,7 +248,7 @@ class PowerGaugeTab:
             if self.capacity_button_list:
                 for k, button in self.capacity_button_list.items():
                     #'capacity_down':  { 'arrow': '\u25BC', 'bounds': [5.20, 0.022, .08, .08], 'active': 'battery_capacity', up: False, },
-                    xreport(self.device_name, 'PowerGauge', f"Checking capacity button {button}", blue=True, )
+                    xreport(self.device_name, 'PowerGauge', f"Checking capacity button", blue=True, )
                     x, y, w, h = button['bounds']
                     active = button['active']
                     up = button['up']
@@ -264,7 +264,7 @@ class PowerGaugeTab:
         logging.info("PowerGauge:clear_highlight: Resetting load_button_clicked highlight")
         self.load_button_clicked = False
         self.update_gauges()
-        self.figure.canvas.draw_idle()
+        self.root.after_idle(self.figure.canvas.draw_idle)
         if self._clear_highlight_after_id:
             self._clear_highlight_after_id = None
 
