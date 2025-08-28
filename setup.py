@@ -9,8 +9,8 @@ setup(
     name="solar12vups",
     version=version_ns["__version__"],
     description="Solar-powered UPS monitor with BLE support and real-time GUI",
-    author="Your Name",
-    author_email="you@example.com",
+    author="Stuart Lynne",
+    author_email="stuart.lynne@gmail.com",
     packages=find_packages(include=["app*", "ble*", "lib*", "gui*"]),
     py_modules=["solar_runner"],
     install_requires=[
