@@ -173,6 +173,7 @@ work correctly.
 - [README-Powerstate](README-Powerstate.md)
 - [README-Bleak-Linux](README-Bleak-Linux.md)
 - [README-BT1](README-BT1.md)
+- [CHANGELOG](CHANGELOG.md)
 - 
 
 ## Desktop Launcher (Linux)
