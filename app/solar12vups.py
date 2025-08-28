@@ -25,6 +25,7 @@ import traceback
 from lib.shutdown import Shutdown
 from lib.asyncman import AsyncTaskManager
 import tkinter as tk
+from pathlib import Path
 
 #from bleak.backends.corebluetooth import CBCharacteristicProperties
 
@@ -452,8 +453,36 @@ def SolarMain():
         if sys.platform == "win32":
             root.iconbitmap("favicon.ico")
         else:
-            icon = tk.PhotoImage(file="favicon-strict.png")
-            root.iconphoto(True, icon)
+            def _find_data_file(name: str) -> str:
+                candidates = []
+                try:
+                    candidates.append(Path(os.getcwd()) / name)
+                except Exception:
+                    pass
+                candidates.extend([
+                    Path(__file__).resolve().parents[1] / name,
+                    Path(sys.prefix) / 'share' / 'solar12vups' / name,
+                    Path('/usr/local/share/solar12vups') / name,
+                    Path('/usr/share/solar12vups') / name,
+                ])
+                for p in candidates:
+                    try:
+                        if p.exists():
+                            return str(p)
+                    except Exception:
+                        continue
+                return name
+
+            icon = None
+            for icon_name in ('favicon-strict.png', 'favicon.png'):
+                try:
+                    icon_path = _find_data_file(icon_name)
+                    icon = tk.PhotoImage(file=icon_path)
+                    break
+                except Exception:
+                    icon = None
+            if icon is not None:
+                root.iconphoto(True, icon)
         #    root.title("Solar 12V UPS Monitor")
 
         xreport('solar12vups', 'Tkinter', f"Starting SolarMonitorApp ... root: {root}", grey=True, )

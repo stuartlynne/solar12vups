@@ -175,3 +175,22 @@ work correctly.
 - [README-BT1](README-BT1.md)
 - 
 
+## Desktop Launcher (Linux)
+
+Create a desktop icon and optional menu entry after install:
+
+```bash
+# User install (no sudo)
+pip install --user .
+solar12vups --add-desktop-icon --menu
+
+# System install (sudo)
+sudo pip install .
+sudo solar12vups --add-desktop-icon --menu
+
+# Desktop-only for current user
+solar12vups --add-desktop-icon
+```
+
+This writes `~/Desktop/solar12vups.desktop` and, with `--menu`, installs a
+`.desktop` entry and icon to user or system paths depending on privileges.
