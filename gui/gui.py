@@ -68,7 +68,10 @@ class SolarMonitorApp:
         'load_power': [],
         'pv_power': [],
         'battery_percentage': [],
-        'load_status': []
+        'load_status': [],
+        'controller_fault_codes': [],
+        'controller_fault_warnings_121': [],
+        'controller_fault_warnings_122': [],
     }
 
     def __init__(self, root=None, client=None, aevents=None, controlQueues=None, shutdownEvent=None, active=None, ):
@@ -96,6 +99,14 @@ class SolarMonitorApp:
 
         self.check_shutdown()  # Start checking for shutdown events
         self.firstime = datetime.now()
+
+    def init_device_history(self):
+        history = {k: [] for k in self.data_history}
+        history['device_nickname'] = ['']
+        history['controller_fault_codes'] = ['OK']
+        history['controller_fault_warnings_121'] = [0]
+        history['controller_fault_warnings_122'] = [0]
+        return history
 
     def check_shutdown(self):
         if self.shutdownEvent and self.shutdownEvent.is_set():
@@ -282,7 +293,13 @@ class SolarMonitorApp:
                      #0xe021, 
             ]
             settings_tab = SettingsTab(device_name=device_name, tab_control=notebook, addrRange=chargingSettings, text="Settings", )
-            values_tab = SettingsTab(device_name=device_name, tab_control=notebook, addrRange=[(0x0100, 0x0109)], text="Operating Values", )
+            values_tab = SettingsTab(
+                device_name=device_name,
+                tab_control=notebook,
+                addrRange=[(0x0100, 0x0109), None, 0x0121],
+                text="Operating Values",
+                labels={0x0121: "Controller Faults"},
+            )
 
             #notebook.add(notebook, text=f"{device_name} \u2716",)
 
@@ -291,7 +308,7 @@ class SolarMonitorApp:
                 'powergauge_tab': powergauge_tab,
                 'settings_tab': settings_tab,
                 'values_tab': values_tab,
-                'data_history': {k: [] for k in self.data_history},
+                'data_history': self.init_device_history(),
                 'container': container,
                 'close_button': close_button,
             }
@@ -301,17 +318,46 @@ class SolarMonitorApp:
         data_history = devinfo['data_history']
 
         data_history['time'].append((None, datetime.now()))
-        data_history['device_nickname'].append((None, data.get('device_nickname', '')))
+        if 'device_nickname' in data:
+            data_history['device_nickname'].append(data['device_nickname'][1])
+        elif data_history['device_nickname']:
+            data_history['device_nickname'].append(data_history['device_nickname'][-1])
+        else:
+            data_history['device_nickname'].append('')
         #logging.info(f"on_data_received: {data_history['time'][-1]}")
         #logging.info(f"on_data_received: {data_history['device_nickname'][-1]}")
 
 
         # Append each relevant value
         for key in data_history:
-            if key == 'time':
+            if key in ('time', 'device_nickname'):
                 continue
-            addr, value, editable = data.get(key, (0, 0, False))
-            data_history[key].append(value)
+            if key in data:
+                addr, value, editable = data[key]
+                data_history[key].append(value)
+            elif data_history[key]:
+                data_history[key].append(data_history[key][-1])
+            else:
+                data_history[key].append(0)
+
+        if (
+            'controller_fault_codes' in data
+            or 'controller_fault_warnings_121' in data
+            or 'controller_fault_warnings_122' in data
+        ):
+            controller_fault_121 = data.get('controller_fault_warnings_121', (None, None, None))[1] if 'controller_fault_warnings_121' in data else None
+            controller_fault_122 = data.get('controller_fault_warnings_122', (None, None, None))[1] if 'controller_fault_warnings_122' in data else None
+            logging.info(f"on_data_received: controller_faults: {controller_fault_121} {controller_fault_122}")
+            logging.info(
+                "FAULTTRACE gui.on_data_received device=%s packet_codes=%r packet_hi=%r packet_lo=%r hist_codes=%r hist_hi=%r hist_lo=%r",
+                device_name,
+                data.get('controller_fault_codes', (None, None, None))[1] if 'controller_fault_codes' in data else None,
+                data.get('controller_fault_warnings_121', (None, None, None))[1] if 'controller_fault_warnings_121' in data else None,
+                data.get('controller_fault_warnings_122', (None, None, None))[1] if 'controller_fault_warnings_122' in data else None,
+                data_history['controller_fault_codes'][-1] if data_history['controller_fault_codes'] else None,
+                data_history['controller_fault_warnings_121'][-1] if data_history['controller_fault_warnings_121'] else None,
+                data_history['controller_fault_warnings_122'][-1] if data_history['controller_fault_warnings_122'] else None,
+            )
 
         if True:
             # Limit history to the last 100 samples
@@ -320,8 +366,9 @@ class SolarMonitorApp:
                     data_history[key] = data_history[key][-100:]
 
          
-        if 'battery_voltage' in data:
+        if 'battery_voltage' in data or 'controller_fault_warnings_122' in data or 'controller_fault_warnings_121' in data:
             devinfo['powergauge_tab'].update_gauges(data_history=data_history)
+        if any(item[0] in devinfo['values_tab'].widgets for item in data.values() if isinstance(item, tuple) and len(item) >= 1):
             devinfo['values_tab'].update_tab_display(data=data, msg="Operating Values")
         if 'voltage_settings' in data:
             devinfo['settings_tab'].update_tab_display(data=data, msg="Settings" )

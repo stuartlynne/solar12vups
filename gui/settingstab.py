@@ -30,13 +30,14 @@ class SettingsTab:
 
         self.widgets = self.populate_tab_grid(addrRange=addrRange, msg="Settings" )
 
-    def __init__(self, device_name=None, tab_control=None, text=None, addrRange=None, controlQueue=None): 
+    def __init__(self, device_name=None, tab_control=None, text=None, addrRange=None, controlQueue=None, labels=None): 
         self.tab_control = tab_control
         self.device_name = device_name
         self.tab = None
         self.text = text
         self.addrRange = addrRange
         self.controlQueue = controlQueue
+        self.labels = labels or {}
 
         # Create a Frame as tab for this tab_control (notebook)
         self.tab = ttk.Frame(self.tab_control)
@@ -78,7 +79,8 @@ class SettingsTab:
         for addr in reglist:
             if addr is not None:
                 key = f"{addr:04x}"
-                f = LabelEditEx(self.inner_frame, description=f"{addr:04x}", addr=addr, value='n/a', editable=False, option=2, callback=self.settings_callback, )
+                description = self.labels.get(addr, f"{addr:04x}")
+                f = LabelEditEx(self.inner_frame, description=description, addr=addr, value='n/a', editable=False, option=2, callback=self.settings_callback, )
                 f.grid(row=row, column=col, padx=10, pady=5, sticky="ew")
                 #f.set_text(description=f"{addr:04x}", addr=addr, value='n/a', editable=False)
                 widgets[key] = f

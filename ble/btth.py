@@ -56,6 +56,54 @@ LOAD_STATE = {
   0: 'off',
   1: 'on'
 }
+
+CONTROLLER_FAULT_BITS_HIGH = {
+    1: 'Battery short circuit protection',
+    0: 'Battery low temperature protection',
+}
+
+CONTROLLER_FAULT_BITS_LOW = {
+    15: 'Fan alarm',
+    14: 'Charge MOS short circuit',
+    13: 'Battery reverse connection protection',
+    12: 'Solar panel reverse connection',
+    11: 'Solar panel working point overvoltage',
+    10: 'Solar panel reverse current',
+    9: 'PV input terminal overvoltage',
+    8: 'PV input terminal short circuit',
+    7: 'PV input power too large',
+    6: 'External environment temperature too high',
+    5: 'Controller temperature too high',
+    4: 'Load power too large or load overcurrent',
+    3: 'Load short circuit',
+    2: 'Battery undervoltage warning',
+    1: 'Battery overvoltage',
+    0: 'Battery overdischarge',
+}
+
+CONTROLLER_FAULT_CODES_LOW = [
+    (0x0001, 'E01'),
+    (0x0002, 'E02'),
+    (0x0004, 'E03'),
+    (0x0008, 'E04'),
+    (0x0010, 'E05'),
+    (0x0020, 'E06'),
+    (0x0040, 'E07'),
+    (0x0080, 'E08'),
+    (0x0100, 'E09'),
+    (0x0200, 'E10'),
+    (0x0400, 'E11'),
+    (0x0800, 'E12'),
+    (0x1000, 'E13'),
+    (0x2000, 'E14'),
+    (0x4000, 'E15'),
+    (0x8000, 'E16'),
+]
+
+CONTROLLER_FAULT_CODES_HIGH = [
+    (0x0001, 'E17'),
+    (0x0002, 'E18'),
+]
     
 BATTERY_TYPE = {
     1: 'open',
@@ -72,6 +120,30 @@ def parse_temperature(raw_value, unit):
                  
 def format_temperature(celcius, unit = 'F'):
     return (celcius * 9/5) + 32 if unit.strip() == 'F' else celcius
+
+
+def decode_controller_fault_warnings(high_word, low_word):
+    faults = [
+        description
+        for bit, description in CONTROLLER_FAULT_BITS_HIGH.items()
+        if high_word & (1 << bit)
+    ]
+    faults.extend(
+        description
+        for bit, description in CONTROLLER_FAULT_BITS_LOW.items()
+        if low_word & (1 << bit)
+    )
+
+    if not faults:
+        return 'None'
+
+    return ', '.join(faults)
+
+
+def decode_controller_fault_codes(high_word, low_word):
+    codes = [code for mask, code in CONTROLLER_FAULT_CODES_LOW if low_word & mask]
+    codes.extend(code for mask, code in CONTROLLER_FAULT_CODES_HIGH if high_word & mask)
+    return 'OK' if not codes else ' '.join(codes)
 
 
 
@@ -271,40 +343,12 @@ class BtThBleakClient(BleakClientEx):
             ('total_battery_full_charges',   0x118, 2, 1),
             ('power_generation_total',       0x11c, 4, 1),
             ('power_consumption_total',      0x11e, 4, 1),
-            ('light_and_charging_state',    0x120, 2, None),
-            ('controller_fault_warnings_121',0x121, 2, None),
-            ('controller_fault_warnings_122',0x122, 2, None),
             ]
         for name, addr, length, scale, in registers:
             data[name] = (f"{addr:04x}", bytes_to_int_offset(bs, addr, length, scale=scale), False, )
 
         data['function'] = (0, FUNCTION.get(bytes_to_int(bs, 1, 1)), False, )
-        temp = bytes_to_int_offset(bs, 0x103, 2)
-        data['battery_temperature'] = (0, parse_temperature(temp&0xff, temp_unit), False)  # 0x103 - low byte
-        data['controller_temperature'] = (0, parse_temperature(temp>>8, temp_unit), False) # 0x103 - high byte
 
-        data['Light On/Off write only'] = (0, None, False, )
-
-
-        status = data['light_and_charging_state'][1]
-        #logging.info(f"status: {status:04x} load:{status >> 7:02x} charging:{status & 0xff:02x} ")
-
-        data['light_charging_state'] = (0x120, [hex(status>>7), hex(status&0xff)], False, ) # high byte first, low byte second
-        data['load_status'] = (0x120, LOAD_STATE.get(status >> 7+8), False)                      # high byte
-        self.load_status = data['load_status'][1]
-        data['charging_status'] = (0x44, CHARGING_STATE.get(status & 0xff), False)             # low byte
-
-        fault121 = data['controller_fault_warnings_121'][1]
-        fault122 = data['controller_fault_warnings_122'][1]
-        #logging.info(f"faults: {fault121:04x} {fault122:04x} ")
-        faults = [hex(fault121>>7), hex(fault121&0xff), hex(fault122>>7), hex(fault122&0xff)]
-        #logging.info(f"faults: {faults} ")
-        data['controller_fault_warnings'] = (0x121, faults, False)                      # high byte
-        #data['controller_fault_warnings'] = (0, f"{data['controller_fault_warnings_raw'][1]:08x}", False, )
-
-
-        #self.check_events_queues(data)
-        #self.data.update(data)
         self.queueData(data)
 
     # YYY
@@ -453,10 +497,16 @@ class BtThBleakClient(BleakClientEx):
 
         fault121 = data['controller_fault_warnings_121'][1]
         fault122 = data['controller_fault_warnings_122'][1]
-        #logging.info(f"faults: {fault121:04x} {fault122:04x} ")
-        faults = [hex(fault121>>7), hex(fault121&0xff), hex(fault122>>7), hex(fault122&0xff)]
-        #logging.info(f"faults: {faults} ")
-        data['controller_fault_warnings'] = (0x121, faults, False)                      # high byte
+        logging.info(f"faults: {fault121:04x} {fault122:04x} ")
+        xreport('BtThBleakClient', self.device_name, f"controller_faults: {fault121:04x} {fault122:04x} ", yellow=True, )
+        data['controller_fault_warnings'] = (
+            '0121',
+            decode_controller_fault_warnings(fault121, fault122),
+            False,
+        )
+        data['controller_fault_codes'] = ('fault-codes', decode_controller_fault_codes(fault121, fault122), False)
+        xreport('BtThBleakClient', self.device_name, f"controller_fault_warnings: {data['controller_fault_warnings']}", yellow=True, )
+        xreport('BtThBleakClient', self.device_name, f"controller_fault_warnings: {data['controller_fault_codes']}", yellow=True, )
         #data['controller_fault_warnings'] = (0, f"{data['controller_fault_warnings_raw'][1]:08x}", False, )
 
 
@@ -618,4 +668,3 @@ class BtThBleakClient(BleakClientEx):
             logging.info(f"Failed to process register update: {register_raw}, {description}, {value_str}")
             logging.info(traceback.print_exc())
   
-

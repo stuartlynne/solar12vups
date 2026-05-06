@@ -72,6 +72,39 @@ class Gaugetype(Enum):
     Battery = 1
     Load = 2
 
+
+FAULT_CODE_TABLE = [
+    (0x0001, "E01", "Battery over-discharged"),
+    (0x0002, "E02", "Battery over-voltage"),
+    (0x0004, "E03", "battery undervoltage"),
+    (0x0008, "E04", "Load short circuit"),
+    (0x0010, "E05", "Load overloaded"),
+    (0x0020, "E06", "Controller over-temperature"),
+    (0x0040, "E07", "External temperature sensor error"),
+    (0x0080, "E08", "PV input over-current"),
+    (0x0100, "E09", "PV input short circuit"),
+    (0x0200, "E10", "PV over-voltage"),
+    (0x0400, "E11", "PV reverse polarity"),
+    (0x0800, "E12", "PV working point over-voltage"),
+    (0x1000, "E13", "PV reverse connection"),
+    (0x2000, "E14", "Battery reverse connection"),
+    (0x4000, "E15", "Circuit charge MOS short circuit"),
+    (0x8000, "E16", "Fan Alarm"),
+]
+
+FAULT_CODE_TABLE_HIGH = [
+    (0x0001, "E17", "Battery low temperature protection"),
+    (0x0002, "E18", "Battery short circuit protection"),
+]
+
+FAULT_TOOLTIP_TABLE = tabulate.tabulate(
+    [("0x0000", "", "No error detected", "Low")]
+    + [(f"0x{mask:04x}", code, description, "Low") for mask, code, description in FAULT_CODE_TABLE]
+    + [(f"0x{mask:04x}", code, description, "High") for mask, code, description in FAULT_CODE_TABLE_HIGH],
+    headers=["BitMask", "Error Number", "Description", "Word"],
+    tablefmt="grid",
+)
+
 if False:
     class PowerState(Enum):
         NoPV_NoBattery = 0
@@ -160,6 +193,21 @@ class PowerGaugeTab:
             logging.info("Sanity tooltip placed")
 
         #self.root.after(1000, sanity_tooltip_test)
+
+    def get_fault_display(self, data_history):
+        if data_history.get('controller_fault_codes'):
+            fault_display = data_history['controller_fault_codes'][-1]
+            logging.info(
+                "FAULTTRACE powergauge.get_fault_display device=%s hist_codes=%r hist_hi=%r hist_lo=%r display=%r",
+                self.device_name,
+                fault_display,
+                data_history['controller_fault_warnings_121'][-1] if data_history.get('controller_fault_warnings_121') else None,
+                data_history['controller_fault_warnings_122'][-1] if data_history.get('controller_fault_warnings_122') else None,
+                fault_display,
+            )
+            return fault_display
+        logging.info("FAULTTRACE powergauge.get_fault_display device=%s hist_codes=None display='OK'", self.device_name)
+        return "OK"
 
     def _start_watchdog(self):
         def check():
@@ -542,6 +590,17 @@ class PowerGaugeTab:
             logging.exception(f"PowerGauge:update_gauges: Error displaying nickname: {e}")
             print(traceback.format_exc(), file=sys.stderr )
 
+        fault_display = self.get_fault_display(data_history)
+        fault_color = 'green' if fault_display == 'OK' else 'red'
+        logging.info(
+            "FAULTTRACE powergauge.update_gauges device=%s render_codes=%r render_color=%s",
+            self.device_name,
+            fault_display,
+            fault_color,
+        )
+        fault_text = self.ax.text(3.0, 2.0, fault_display, ha='center', va='bottom', fontsize=13, weight='bold', color=fault_color)
+        self.tooltip.add_tip_artist(fault_text, FAULT_TOOLTIP_TABLE, fixedFont=True, name="fault-status")
+
         info_values = [v for k, v in self.info.items() if v and k != 'device_nickname' and v != 'N/A' and v != '']
         self.ax.text(-0.15, 0.092, f"{', '.join(info_values)}", ha='left', va='bottom', fontsize=10, weight='bold')
 
@@ -734,6 +793,3 @@ if __name__ == "__main__":
     #powerState = PowerState.noPV_noBattery
     #print(f"PowerState: {powerState}")
     #print(f"PowerState: {powerState.name}")
-
-
-
