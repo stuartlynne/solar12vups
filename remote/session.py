@@ -114,6 +114,13 @@ class RemoteBtThSession:
         )
         return any(part in message for part in expected_substrings)
 
+    def is_shutdown_error(self, exc):
+        if isinstance(exc, GeneratorExit):
+            return True
+        if isinstance(exc, RuntimeError) and "event loop is closed" in str(exc).lower():
+            return True
+        return False
+
     def create_generic_read_request(self, device_id, function, regAddr, readWrd):
         data = [device_id, function]
         if regAddr is not None and readWrd is not None:
@@ -142,7 +149,13 @@ class RemoteBtThSession:
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 raise
+            except GeneratorExit as exc:
+                logger.info("RemoteBtThSession[%s] shutting down: %s", self.device_name, exc)
+                return
             except Exception as exc:
+                if self.is_shutdown_error(exc):
+                    logger.info("RemoteBtThSession[%s] shutting down: %s", self.device_name, exc)
+                    return
                 status_message, status_level = self.describe_error(exc)
                 if self.is_expected_error(exc):
                     logger.info("RemoteBtThSession[%s] expected status: %s", self.device_name, status_message)

@@ -9,6 +9,7 @@ import sys
 import os
 import json
 import asyncio
+import concurrent.futures
 import async_timeout
 import signal
 from colored import cprint, fg, bg, attr, set_tty_aware
@@ -164,8 +165,10 @@ def handle_task_result(task):
     try:
         value = task.result()
         xreport(name, 'Finished', yellow=True)
-    except asyncio.CancelledError as e:
-        logging.exception('handle_task_result: exception: %s' % (e, ))
+    except asyncio.CancelledError:
+        logger.info('handle_task_result: task cancelled: %s', name)
+    except concurrent.futures.CancelledError:
+        logger.info('handle_task_result: future cancelled: %s', name)
     except Exception as e:
         logging.exception('handle_task_result: exception: %s' % (e, ))
         print(traceback.format_exc(), file=sys.stderr)

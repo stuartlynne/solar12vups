@@ -258,7 +258,37 @@ class SolarMonitorApp:
     def create_widgets(self):
         self.devices_frame = ttk.Frame(self.root)
         self.devices_frame.pack(fill="both", expand=True)
+        self.devices_frame.grid_columnconfigure(0, weight=1)
         self.device_notebooks = {}
+
+    def _parse_geometry(self):
+        match = re.fullmatch(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", self.root.geometry())
+        if not match:
+            return None
+        width, height, x, y = map(int, match.groups())
+        return width, height, x, y
+
+    def _relayout_device_notebooks(self):
+        names = list(self.device_notebooks.keys())
+        count = len(names)
+        for row in range(max(count, self.devices_frame.grid_size()[1])):
+            self.devices_frame.grid_rowconfigure(row, weight=0)
+
+        for row, name in enumerate(names):
+            devinfo = self.device_notebooks[name]
+            container = devinfo['container']
+            container.grid_forget()
+            if count <= 1:
+                self.devices_frame.grid_rowconfigure(row, weight=0)
+                container.grid(row=row, column=0, sticky="ew", pady=6, padx=8)
+            else:
+                self.devices_frame.grid_rowconfigure(row, weight=1, uniform="devices")
+                container.grid(row=row, column=0, sticky="nsew", pady=6, padx=8)
+
+    def _grow_window_for_devices(self):
+        # Preserve the user's chosen window size. New device notebooks should
+        # fit within the existing geometry instead of growing the root window.
+        return
 
     def ensure_device_notebook(self, device_name):
         if device_name in self.device_notebooks:
@@ -278,7 +308,6 @@ class SolarMonitorApp:
         xreport(device_name, 'device_notebook', f"device_notebooks: {self.device_notebooks.keys()}", blue=True)
 
         container = ttk.LabelFrame(self.devices_frame, text=device_name)
-        container.pack(fill="x", expand=False, pady=6, padx=8, anchor="n")
         notebook = ttk.Notebook(container)
         notebook.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -354,6 +383,7 @@ class SolarMonitorApp:
             self.root.after_idle(lambda dn=device_name: self._render_device_placeholder(dn))
         else:
             self.device_notebooks[device_name]['static_ready'] = True
+        self._relayout_device_notebooks()
         xreport(device_name, 'device_notebook', f"device_notebooks: {self.device_notebooks.keys()} added", blue=True)
         return self.device_notebooks[device_name]
 
@@ -390,13 +420,18 @@ class SolarMonitorApp:
         info['status_text'] = status_text
         info['status_level'] = status_level
         if not USE_SIMPLE_DEVICE_PLACEHOLDER and devinfo.get('powergauge_tab') is not None:
-            devinfo['powergauge_tab'].update_placeholder_status()
+            powergauge_tab = devinfo['powergauge_tab']
+            if getattr(powergauge_tab, "_last_data_history", None) is not None:
+                powergauge_tab.update_gauges(powergauge_tab._last_data_history)
+            else:
+                powergauge_tab.render_static_placeholder()
 
     def _render_device_placeholder(self, device_name):
         devinfo = self.device_notebooks.get(device_name)
         if not devinfo:
             return
         data_history = devinfo['data_history']
+        devinfo['powergauge_tab']._last_data_history = data_history
         devinfo['powergauge_tab'].render_static_placeholder()
         devinfo['static_ready'] = True
         if TRACE_GUI_UPDATES:
@@ -436,6 +471,7 @@ class SolarMonitorApp:
             if 'container' in devinfo:
                 if devinfo['container'] is not None:
                     devinfo['container'].destroy()
+            self._relayout_device_notebooks()
             # If you added a close button above, destroy it too (track it in devinfo or pack it as a child frame)
             # Optionally clean up other per-device data
             xreport(device_name, 'close_device_notebook', 'Notebook removed by user', yellow=True)
@@ -540,6 +576,12 @@ class SolarMonitorApp:
             if len(data_history['time']) > 100:
                 for key in data_history:
                     data_history[key] = data_history[key][-100:]
+
+        # Once real telemetry is flowing, clear any transient connection or
+        # transport status so it does not overdraw the live gauge text.
+        info = self.info.setdefault(device_name, {})
+        info['status_text'] = ''
+        info['status_level'] = ''
 
          
         if 'battery_voltage' in data or 'controller_fault_warnings_122' in data or 'controller_fault_warnings_121' in data:
