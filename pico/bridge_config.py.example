@@ -1,0 +1,18 @@
+CONFIG = {
+    "bridge_name": "bridge-box-1",
+    "wifi_ssid": "replace-me",
+    "wifi_password": "replace-me",
+    "wifi_static_ip": None,
+    "wifi_netmask": "255.255.255.0",
+    "wifi_gateway": "192.168.1.1",
+    "wifi_dns": "192.168.1.1",
+    "server_host": "192.168.1.10",
+    "server_port": 9765,
+    "health_port": 8766,
+    "uart_id": 0,
+    "uart_baudrate": 9600,
+    "uart_tx_pin": 0,
+    "uart_rx_pin": 1,
+    "modbus_timeout_ms": 1500,
+    "wifi_timeout_s": 20,
+}

@@ -2,6 +2,8 @@ import asyncio
 import configparser
 import os
 import tkinter as tk
+import queue
+import re
 from tkinter import ttk
 from tkinter import Canvas, Frame, Scrollbar
 from datetime import datetime, timedelta
@@ -20,6 +22,9 @@ from gui.powergauge import PowerGaugeTab
 import logging
 from lib.log import setup_logger, xreport
 logger = logging.getLogger(__name__)
+
+TRACE_GUI_UPDATES = False
+USE_SIMPLE_DEVICE_PLACEHOLDER = False
 
 # Setup logging
 #logging.basicConfig(level=logging.INFO)
@@ -74,17 +79,24 @@ class SolarMonitorApp:
         'controller_fault_warnings_122': [],
     }
 
-    def __init__(self, root=None, client=None, aevents=None, controlQueues=None, shutdownEvent=None, active=None, ):
+    def __init__(self, root=None, client=None, aevents=None, controlQueues=None, shutdownEvent=None, active=None, incoming_queue=None, ):
         self.root = root
-        self.root.geometry("800x400")
         self.client = client
         self.aevents = aevents
         self.controlQueues = controlQueues
         self.shutdownEvent = shutdownEvent
         self.setLoadEvent = None
-        self.active = active
+        self.active = active if active is not None else {'devices': {}}
+        self.active.setdefault('devices', {})
         self.root.title("Solar 12Vdc UPS Monitor")
         self.load = 0
+        self.ui_update_queue = queue.SimpleQueue()
+        self.incoming_queue = incoming_queue
+        self.pending_ui_updates = {}
+        self._save_geometry_after_id = None
+
+        self._restore_window_geometry()
+        self.root.bind("<Configure>", self._on_root_configure)
 
         xreport('SolarMonitorApp', 'Initializing SolarMonitorApp ', f"root: {self.root} aevents: {self.aevents} controlQueues: {self.controlQueues}", yellow=True)
 
@@ -98,7 +110,37 @@ class SolarMonitorApp:
         self.create_widgets()
 
         self.check_shutdown()  # Start checking for shutdown events
+        self.process_ui_updates()
         self.firstime = datetime.now()
+
+    def _valid_geometry(self, geometry):
+        return bool(re.fullmatch(r"\d+x\d+\+\d+\+\d+", str(geometry or "")))
+
+    def _restore_window_geometry(self):
+        geometry = self.active.get('window_geometry')
+        if self._valid_geometry(geometry):
+            self.root.geometry(geometry)
+        else:
+            self.root.geometry("800x400")
+
+    def _on_root_configure(self, event):
+        if event.widget is not self.root:
+            return
+        if self._save_geometry_after_id:
+            try:
+                self.root.after_cancel(self._save_geometry_after_id)
+            except Exception:
+                pass
+        self._save_geometry_after_id = self.root.after(300, self._save_window_geometry)
+
+    def _save_window_geometry(self):
+        self._save_geometry_after_id = None
+        try:
+            geometry = self.root.geometry()
+            if self._valid_geometry(geometry):
+                self.active['window_geometry'] = geometry
+        except Exception:
+            pass
 
     def init_device_history(self):
         history = {k: [] for k in self.data_history}
@@ -108,6 +150,13 @@ class SolarMonitorApp:
         history['controller_fault_warnings_122'] = [0]
         return history
 
+    def _normalize_field_value(self, value, default=''):
+        if isinstance(value, tuple) and len(value) >= 2:
+            value = value[1]
+        if value is None:
+            return default
+        return value
+
     def check_shutdown(self):
         if self.shutdownEvent and self.shutdownEvent.is_set():
             xreport('SolarMonitorApp', '', 'Shutdown event detected, closing GUI', blue=True)
@@ -115,6 +164,41 @@ class SolarMonitorApp:
         else:
             #xreport('SolarMonitorApp', '', 'Shutdown not detected', blue=True)
             self.root.after(2000, self.check_shutdown)  # check again in 1 second
+
+    def enqueue_data_received(self, device_name, data):
+        self.ui_update_queue.put((device_name, data))
+
+    def process_ui_updates(self):
+        try:
+            if self.incoming_queue is not None:
+                while True:
+                    device_name, data = self.incoming_queue.get_nowait()
+                    if '__ui_event__' in data:
+                        event_value = data['__ui_event__'][1] if isinstance(data['__ui_event__'], tuple) and len(data['__ui_event__']) > 1 else data['__ui_event__']
+                        if event_value == 'device_ready':
+                            self.on_data_received(device_name, data)
+                            continue
+                    self.pending_ui_updates[device_name] = data
+            while True:
+                device_name, data = self.ui_update_queue.get_nowait()
+                if '__ui_event__' in data:
+                    event_value = data['__ui_event__'][1] if isinstance(data['__ui_event__'], tuple) and len(data['__ui_event__']) > 1 else data['__ui_event__']
+                    if event_value == 'device_ready':
+                        self.on_data_received(device_name, data)
+                        continue
+                self.pending_ui_updates[device_name] = data
+        except queue.Empty:
+            pass
+        finally:
+            processed = 0
+            for device_name in list(self.pending_ui_updates.keys()):
+                data = self.pending_ui_updates.pop(device_name)
+                self.on_data_received(device_name, data)
+                processed += 1
+                # Keep the Tk main loop responsive while data is streaming.
+                if processed >= 1:
+                    break
+            self.root.after(150, self.process_ui_updates)
 
     def x_expandlist(self, ranges=None):
         return [i for r in ranges for i in (range(r[0], r[1] + 1) if len(r) == 2 else [r[0]])]
@@ -172,12 +256,155 @@ class SolarMonitorApp:
 
 
     def create_widgets(self):
-        # Status Panel (left)
-        #self.status_frame = FrameEx( self.root, labelframe=True, text=" Status ", padding=10, outerFlag=True, grid={"row": 0, "column": 0, "sticky": "nw"},)
-
-        self.scroll_frame = ScrollableFrame(self.root)
-        self.scroll_frame.pack(fill="both", expand=True)
+        self.devices_frame = ttk.Frame(self.root)
+        self.devices_frame.pack(fill="both", expand=True)
         self.device_notebooks = {}
+
+    def ensure_device_notebook(self, device_name):
+        if device_name in self.device_notebooks:
+            if TRACE_GUI_UPDATES:
+                logging.info("GUI:ensure_device_notebook existing device=%s", device_name)
+            return self.device_notebooks[device_name]
+
+        if device_name not in self.active['devices']:
+            self.active['devices'][device_name] = {
+                'battery_capacity': 8,
+                'batteries': 1,
+                'device_nickname': '',
+                'battery_chemistry': 'LiFePo4',
+            }
+
+        xreport(device_name, 'device_notebook', f"Creating notebook for device: {device_name}", blue=True)
+        xreport(device_name, 'device_notebook', f"device_notebooks: {self.device_notebooks.keys()}", blue=True)
+
+        container = ttk.LabelFrame(self.devices_frame, text=device_name)
+        container.pack(fill="x", expand=False, pady=6, padx=8, anchor="n")
+        notebook = ttk.Notebook(container)
+        notebook.pack(fill="both", expand=True, padx=4, pady=4)
+
+        close_button = None
+
+        info_keys = ['device_nickname', 'device_name', 'model', 'load_status', 'charging_status']
+        info = self.info.setdefault(device_name, {k: '' for k in info_keys})
+        xreport(device_name, 'device_notebook', f"Creating tabs for device: {device_name} with info: {info}", yellow=True)
+
+        data_history = self.init_device_history()
+        if USE_SIMPLE_DEVICE_PLACEHOLDER:
+            power_tab = ttk.Frame(notebook)
+            notebook.add(power_tab, text="Power Flow")
+            title_label = ttk.Label(
+                power_tab,
+                text=f"DEVICE READY\n{device_name}",
+                anchor="center",
+                justify="center",
+            )
+            title_label.pack(fill="x", expand=False, padx=24, pady=(24, 8))
+            status_var = tk.StringVar(value="Waiting for device status...")
+            status_label = ttk.Label(
+                power_tab,
+                textvariable=status_var,
+                anchor="center",
+                justify="center",
+                wraplength=600,
+            )
+            status_label.pack(fill="both", expand=True, padx=24, pady=(0, 24))
+            powergauge_tab = None
+        else:
+            powergauge_tab = PowerGaugeTab(
+                root=self.root,
+                device_name=device_name,
+                tab_control=notebook,
+                aevents=self.aevents,
+                controlQueues=self.controlQueues,
+                shutdownEvent=self.shutdownEvent,
+                active=self.active['devices'][device_name],
+                info=info,
+                close_callback=lambda: self.close_device_notebook(device_name),
+            )
+
+        chargingSettings = [
+                 (0xe005,0xe006),0xe00c,None,
+                 0xe008,0xe00a,0xe012,None,
+                 0xe009, None, None, None,
+                 0xe007,0xe011,0xe013, None,
+                 0xe00b,0xe00d,0xe00e, 0xe010,
+        ]
+        settings_tab = SettingsTab(device_name=device_name, tab_control=notebook, addrRange=chargingSettings, text="Settings", )
+        values_tab = SettingsTab(
+            device_name=device_name,
+            tab_control=notebook,
+            addrRange=[(0x0100, 0x0109), None, 0x0121],
+            text="Operating Values",
+            labels={0x0121: "Controller Faults"},
+        )
+
+        self.device_notebooks[device_name] = {
+            'notebook': notebook,
+            'powergauge_tab': powergauge_tab,
+            'settings_tab': settings_tab,
+            'values_tab': values_tab,
+            'data_history': data_history,
+            'container': container,
+            'close_button': close_button,
+            'static_ready': False,
+            'status_var': status_var if USE_SIMPLE_DEVICE_PLACEHOLDER else None,
+            'status_label': status_label if USE_SIMPLE_DEVICE_PLACEHOLDER else None,
+        }
+        if not USE_SIMPLE_DEVICE_PLACEHOLDER:
+            self.root.after_idle(lambda dn=device_name: self._render_device_placeholder(dn))
+        else:
+            self.device_notebooks[device_name]['static_ready'] = True
+        xreport(device_name, 'device_notebook', f"device_notebooks: {self.device_notebooks.keys()} added", blue=True)
+        return self.device_notebooks[device_name]
+
+    def update_device_status(self, device_name, data):
+        devinfo = self.ensure_device_notebook(device_name)
+        status_text = self._normalize_field_value(data.get('status_text'), default='Waiting for device status...')
+        status_level = str(self._normalize_field_value(data.get('status_level'), default='info')).lower()
+
+        if TRACE_GUI_UPDATES:
+            logging.info(
+                "GUI:update_device_status device=%s level=%s text=%s",
+                device_name,
+                status_level,
+                status_text,
+            )
+
+        if USE_SIMPLE_DEVICE_PLACEHOLDER and devinfo.get('status_var') is not None:
+            devinfo['status_var'].set(status_text)
+            status_label = devinfo.get('status_label')
+            if status_label is not None:
+                foreground = {
+                    'ok': 'dark green',
+                    'error': 'dark red',
+                    'warn': '#8a5a00',
+                    'warning': '#8a5a00',
+                    'info': '#204a87',
+                }.get(status_level, 'black')
+                try:
+                    status_label.configure(foreground=foreground)
+                except Exception:
+                    pass
+
+        info = self.info.setdefault(device_name, {})
+        info['status_text'] = status_text
+        info['status_level'] = status_level
+        if not USE_SIMPLE_DEVICE_PLACEHOLDER and devinfo.get('powergauge_tab') is not None:
+            devinfo['powergauge_tab'].update_placeholder_status()
+
+    def _render_device_placeholder(self, device_name):
+        devinfo = self.device_notebooks.get(device_name)
+        if not devinfo:
+            return
+        data_history = devinfo['data_history']
+        devinfo['powergauge_tab'].render_static_placeholder()
+        devinfo['static_ready'] = True
+        if TRACE_GUI_UPDATES:
+            logging.info(
+                "GUI:ensure_device_notebook initialized static placeholder device=%s history_keys=%s",
+                device_name,
+                {k: len(v) if isinstance(v, list) else None for k, v in data_history.items()},
+            )
 
 
     def toggle_load(self):
@@ -203,6 +430,8 @@ class SolarMonitorApp:
     def close_device_notebook(self, device_name):
         devinfo = self.device_notebooks.pop(device_name, None)
         if devinfo:
+            if 'powergauge_tab' in devinfo and devinfo['powergauge_tab'] is not None:
+                devinfo['powergauge_tab'].close()
             devinfo['notebook'].destroy()
             if 'container' in devinfo:
                 if devinfo['container'] is not None:
@@ -229,6 +458,22 @@ class SolarMonitorApp:
         #logging.info(f"on_data_received: {device_name}")
         #xreport(device_name, 'on_data_received', f"Received data: {data}", yellow=True)
 
+        if '__ui_event__' in data:
+            event_value = data['__ui_event__'][1] if isinstance(data['__ui_event__'], tuple) and len(data['__ui_event__']) > 1 else data['__ui_event__']
+            if event_value == 'device_ready':
+                if TRACE_GUI_UPDATES:
+                    logging.info("GUI:on_data_received device_ready device=%s", device_name)
+                self.ensure_device_notebook(device_name)
+                return
+            if event_value == 'device_status':
+                self.update_device_status(device_name, data)
+                return
+
+        if device_name not in self.device_notebooks:
+            if TRACE_GUI_UPDATES:
+                logging.info("GUI:on_data_received dropping data before notebook ready device=%s keys=%s", device_name, list(data.keys()))
+            return
+
         info_keys = ['device_nickname', 'device_name', 'model', 'load_status', 'charging_status']
         if device_name not in self.info:
             #self.info[device_name] = { 'device_nickname': '', 'device_name': '', 'model': '', 'load_status': 'off', 'charging_status': 'deactivated', }
@@ -240,81 +485,11 @@ class SolarMonitorApp:
                 self.info[device_name][key] = data[key][1].strip() if isinstance(data[key][1], str) else data[key][1]
             #xreport(device_name, 'on_data_received', f"info updated: {self.info[device_name]}", yellow=True)
 
-        if device_name not in self.device_notebooks:
-            if device_name not in self.active['devices']:
-                self.active['devices'][device_name] = {'battery_capacity': 8, 'batteries': 1, 'device_nickname': '', 'battery_chemistry':'LiFePo4', }
-
-            xreport(device_name, 'on_data_received', f"Creating new notebook for device: {device_name}", blue=True)
-            xreport(device_name, 'on_data_received', f"device_notebooks: {self.device_notebooks.keys()}", blue=True)
-
-            notebook = ttk.Notebook(self.scroll_frame.scrollable_frame)
-            notebook.pack(fill="both", expand=True, pady=6, padx=8, )
-
-            close_button = None
-            container = None
-            if False:
-                # Frame to contain the notebook and close button
-                container = ttk.Frame(self.scroll_frame.scrollable_frame)
-                container.pack(fill="x", pady=6, padx=8)
-
-                # Close button
-                close_btn = ttk.Button(
-                    container, text="✖", width=2,
-                    command=lambda dn=device_name: self.close_device_notebook(dn)
-                )
-                #close_btn.pack(side="right", padx=4)
-                #close_btn.place(in_=notebook, relx=1.0, x=-26, y=2, anchor="ne")  # Tune x/y for best alignment
-                #close_btn.place(relx=1.0, x=-26, y=2, anchor="ne")
-                close_btn.place(relx=1.0, y=32, anchor="ne")
-
-
-            if len(self.device_notebooks) == 1:
-                self.root.update_idletasks()  # Make sure geometry info is current
-                x = self.root.winfo_x()
-                y = self.root.winfo_y()
-
-                # Change size AND preserve position
-                self.root.geometry(f"800x800+{x}+{y}")
-
-
-            info = self.info[device_name]  # Get dict for this device info
-            xreport(device_name, 'on_data_received', f"Creating tabs for device: {device_name} with info: {info}", yellow=True)
-            powergauge_tab = PowerGaugeTab(root=self.root, device_name=device_name, tab_control=notebook, aevents=self.aevents, controlQueues=self.controlQueues,
-                                           shutdownEvent=self.shutdownEvent, active=self.active['devices'][device_name], info=info,
-                                           close_callback=lambda: self.close_device_notebook(device_name),
-                                           )
-            # Create settings/other tabs as needed
-            chargingSettings = [
-                     (0xe005,0xe006),0xe00c,None,     # safety limits
-                     0xe008,0xe00a,0xe012,None,     # boost charging
-                     0xe009, None, None, None,      # floating
-                     0xe007,0xe011,0xe013, None,    # equalization
-                     0xe00b,0xe00d,0xe00e, 0xe010,  # over discharge protection
-                     #0xe021, 
-            ]
-            settings_tab = SettingsTab(device_name=device_name, tab_control=notebook, addrRange=chargingSettings, text="Settings", )
-            values_tab = SettingsTab(
-                device_name=device_name,
-                tab_control=notebook,
-                addrRange=[(0x0100, 0x0109), None, 0x0121],
-                text="Operating Values",
-                labels={0x0121: "Controller Faults"},
-            )
-
-            #notebook.add(notebook, text=f"{device_name} \u2716",)
-
-            self.device_notebooks[device_name] = {
-                'notebook': notebook,
-                'powergauge_tab': powergauge_tab,
-                'settings_tab': settings_tab,
-                'values_tab': values_tab,
-                'data_history': self.init_device_history(),
-                'container': container,
-                'close_button': close_button,
-            }
-            xreport(device_name, 'on_data_received', f"device_notebooks: {self.device_notebooks.keys()} added", blue=True)
-
-        devinfo = self.device_notebooks[device_name]
+        devinfo = self.ensure_device_notebook(device_name)
+        if not devinfo.get('static_ready'):
+            if TRACE_GUI_UPDATES:
+                logging.info("GUI:on_data_received dropping data until static_ready device=%s keys=%s", device_name, list(data.keys()))
+            return
         data_history = devinfo['data_history']
 
         data_history['time'].append((None, datetime.now()))
@@ -347,17 +522,18 @@ class SolarMonitorApp:
         ):
             controller_fault_121 = data.get('controller_fault_warnings_121', (None, None, None))[1] if 'controller_fault_warnings_121' in data else None
             controller_fault_122 = data.get('controller_fault_warnings_122', (None, None, None))[1] if 'controller_fault_warnings_122' in data else None
-            logging.info(f"on_data_received: controller_faults: {controller_fault_121} {controller_fault_122}")
-            logging.info(
-                "FAULTTRACE gui.on_data_received device=%s packet_codes=%r packet_hi=%r packet_lo=%r hist_codes=%r hist_hi=%r hist_lo=%r",
-                device_name,
-                data.get('controller_fault_codes', (None, None, None))[1] if 'controller_fault_codes' in data else None,
-                data.get('controller_fault_warnings_121', (None, None, None))[1] if 'controller_fault_warnings_121' in data else None,
-                data.get('controller_fault_warnings_122', (None, None, None))[1] if 'controller_fault_warnings_122' in data else None,
-                data_history['controller_fault_codes'][-1] if data_history['controller_fault_codes'] else None,
-                data_history['controller_fault_warnings_121'][-1] if data_history['controller_fault_warnings_121'] else None,
-                data_history['controller_fault_warnings_122'][-1] if data_history['controller_fault_warnings_122'] else None,
-            )
+            if TRACE_GUI_UPDATES:
+                logging.info(f"on_data_received: controller_faults: {controller_fault_121} {controller_fault_122}")
+                logging.info(
+                    "FAULTTRACE gui.on_data_received device=%s packet_codes=%r packet_hi=%r packet_lo=%r hist_codes=%r hist_hi=%r hist_lo=%r",
+                    device_name,
+                    data.get('controller_fault_codes', (None, None, None))[1] if 'controller_fault_codes' in data else None,
+                    data.get('controller_fault_warnings_121', (None, None, None))[1] if 'controller_fault_warnings_121' in data else None,
+                    data.get('controller_fault_warnings_122', (None, None, None))[1] if 'controller_fault_warnings_122' in data else None,
+                    data_history['controller_fault_codes'][-1] if data_history['controller_fault_codes'] else None,
+                    data_history['controller_fault_warnings_121'][-1] if data_history['controller_fault_warnings_121'] else None,
+                    data_history['controller_fault_warnings_122'][-1] if data_history['controller_fault_warnings_122'] else None,
+                )
 
         if True:
             # Limit history to the last 100 samples

@@ -17,6 +17,7 @@ import platform
 from functools import partial
 from bleak import BleakScanner
 from enum import Enum, IntEnum
+from types import SimpleNamespace
 
 import traceback
 from lib.lib import bytes2str, uuid_to_name, name_to_uuid
@@ -42,20 +43,26 @@ statistics = {}
 class BleakClientEx(BleakClient):
 
     def __init__(self, device, active=None, aevents=None, controlQueue=None, dataQueue=None, *args, **kwargs):
-        self.device = device
-        self.device_name = device.name.strip()
+        self.device = device if not isinstance(device, dict) else SimpleNamespace(**device)
+        self.device_name = getattr(self.device, 'name', '').strip()
+        self.device_address = getattr(self.device, 'address', None)
         self.aevents = aevents
         self.controlQueue = controlQueue
         self.dataQueue = dataQueue
         self.no_data_restart_seconds = None
         self.start_time = time()
         self.last_data_time = time()
+        self.closing = False
         self.disconnect_called = False
         self.disconnected_callback_called = False
+        self.first_data_event = asyncio.Event()
+        self.poll_task = None
 
-        xreport('BleakClientEx', self.device_name, '__init__ calling super().__init__', yellow=True, )
-        super().__init__(device, *args, **kwargs)
-        xreport('BleakClientEx', self.device_name, '__init__ finished super().__init__', yellow=True, )
+        bleak_target = kwargs.pop('bleak_target', None)
+        if bleak_target is None:
+            bleak_target = self.device_address if self.device_address else self.device
+
+        super().__init__(bleak_target, *args, **kwargs)
         logging.info(f"BleakClientEx: %s controlQueue: %s dataQueue: %s" % (self.device_name, controlQueue, dataQueue, ))
 
         #self.device = device
@@ -77,8 +84,9 @@ class BleakClientEx(BleakClient):
         except Exception as e:
             logging.exception('no_data_restart_needed error: %s', e)
             print(traceback.format_exc(), file=sys.stderr)
+    @property
     def is_connected(self):
-        return self.is_connected
+        return super().is_connected
 
 
     async def read_gatt_char(self, char_uuid, ):
@@ -158,5 +166,17 @@ class BleakClientEx(BleakClient):
         xreport(self.device_name, uuid_to_name(uuid), bytes2str(data), )
 
     async def disconnect(self):
+        self.closing = True
         self.disconnect_called = True
-        await super().disconnect()
+        if self.poll_task is not None:
+            self.poll_task.cancel()
+            self.poll_task = None
+        for uuid, _notification in getattr(self, 'notify_list', []):
+            try:
+                await super().stop_notify(uuid)
+            except Exception:
+                pass
+        try:
+            await super().disconnect()
+        except (EOFError, BleakError):
+            pass

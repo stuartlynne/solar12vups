@@ -22,11 +22,14 @@ from matplotlib.figure import Figure
 
 from gui.powerstate import PowerState, PowerStateHelp, LiFePo4, Power, PowerStateInfo
 from gui.tooltip import ToolTipManager
+from lib.drawanim import DrawAnimated
 
 
 import logging
 from lib.log import setup_logger, xreport
 logger = logging.getLogger(__name__)
+
+TRACE_POWERGAUGE = False
 
 # Implement a power gauge, this is three vertical sliders, one each for V, A and W.
 # - This is replicated for PV/PS, Battery and Load.
@@ -154,6 +157,25 @@ class PowerGaugeTab:
         self.client_task_event = f"{device_name.strip()}_client_task_event"
         self._clear_timer = None
         self._clear_highlight_after_id = None
+        self._watchdog_after_id = None
+        self._resize_after_id = None
+        self._closed = False
+        self._static_dirty = True
+        self._static_artists = []
+        self._dynamic_artists = []
+        self._last_data_history = None
+        self._draw_scheduled = False
+        self._draw_after_id = None
+        self._use_animated_render = False
+        self._render_artists_animated = False
+        self._placeholder_active = False
+        self._placeholder_start_time = None
+        self._placeholder_after_id = None
+        self._placeholder_text_artist = None
+        self._placeholder_time_artist = None
+        self._placeholder_draw_inflight = False
+        self._placeholder_static_ready = False
+        self._ui_static_signature = None
         #self.ax = self.figure.add_subplot(111)
 
 
@@ -164,14 +186,18 @@ class PowerGaugeTab:
 
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.tab)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.canvas.draw()
 
         self.tooltip = ToolTipManager(self.root, self.canvas.get_tk_widget(), self.canvas, self.ax)
         self.power = Power(name=device_name, )
+        self.drawanim = DrawAnimated(self.figure, name=device_name or text)
+        self.drawanim.open(xaxis_dynamic=False, yaxis_dynamic=False, extra_static_artists=self._static_artists, debug=False, name=device_name or text)
 
         self.load_button_bounds = self.close_button_bounds = None
         self.name_button_bounds = self.capacity_button_list = None
         self.load_button_clicked = False
         self.figure.canvas.mpl_connect('button_press_event', self.on_click)
+        self.figure.canvas.mpl_connect('resize_event', lambda event: self._queue_resize_refresh())
 
         self.nickname = None
         self.csvtitles = [ 'timestamp', 'powerState', 'pvps_v', 'pvps_a', 'pvps_w', 'batt_v', 'batt_a', 'batt_w', 'load_v', 'load_a', 'load_w', ]
@@ -197,28 +223,431 @@ class PowerGaugeTab:
     def get_fault_display(self, data_history):
         if data_history.get('controller_fault_codes'):
             fault_display = data_history['controller_fault_codes'][-1]
-            logging.info(
-                "FAULTTRACE powergauge.get_fault_display device=%s hist_codes=%r hist_hi=%r hist_lo=%r display=%r",
-                self.device_name,
-                fault_display,
-                data_history['controller_fault_warnings_121'][-1] if data_history.get('controller_fault_warnings_121') else None,
-                data_history['controller_fault_warnings_122'][-1] if data_history.get('controller_fault_warnings_122') else None,
-                fault_display,
-            )
+            if TRACE_POWERGAUGE:
+                logging.info(
+                    "FAULTTRACE powergauge.get_fault_display device=%s hist_codes=%r hist_hi=%r hist_lo=%r display=%r",
+                    self.device_name,
+                    fault_display,
+                    data_history['controller_fault_warnings_121'][-1] if data_history.get('controller_fault_warnings_121') else None,
+                    data_history['controller_fault_warnings_122'][-1] if data_history.get('controller_fault_warnings_122') else None,
+                    fault_display,
+                )
             return fault_display
-        logging.info("FAULTTRACE powergauge.get_fault_display device=%s hist_codes=None display='OK'", self.device_name)
+        if TRACE_POWERGAUGE:
+            logging.info("FAULTTRACE powergauge.get_fault_display device=%s hist_codes=None display='OK'", self.device_name)
         return "OK"
 
     def _start_watchdog(self):
         def check():
+            if self._closed:
+                return
             self._watchdog_tick()
             if self.shutdownEvent.is_set():
                 xreport(self.device_name, 'WatchDog', 'Shutdown is set', grey=True, )
                 return
-            self.canvas.get_tk_widget().after(1000, check)  # run every 1s
+            self._watchdog_after_id = self.canvas.get_tk_widget().after(1000, check)  # run every 1s
         check()
 
+    def _safe_draw_idle(self):
+        if self._closed:
+            return
+        try:
+            widget = self.canvas.get_tk_widget()
+            if not widget.winfo_exists():
+                return
+            if self.figure is None or self.figure.canvas is None:
+                return
+            self.root.after_idle(self.figure.canvas.draw_idle)
+        except Exception as e:
+            logging.debug("PowerGauge:_safe_draw_idle skipped: %s", e)
+
+    def _invalidate_static(self):
+        self._static_dirty = True
+        self._static_artists.clear()
+        self._ui_static_signature = None
+        try:
+            self.drawanim.reset('invalidate-static')
+        except Exception:
+            pass
+
+    def _current_display_name(self):
+        name = self.active.get('device_nickname', '')
+        if name == '':
+            if 'device_nickname' in self.info:
+                name = self.info['device_nickname']
+            else:
+                name = self.device_name
+        return name
+
+    def _current_ui_static_signature(self):
+        return (
+            self._current_display_name(),
+            bool(self.load_button_clicked),
+            self.active.get('battery_capacity', 8),
+            self.active.get('batteries', 1),
+        )
+
+    def _track_dynamic_artist(self, artist):
+        try:
+            artist.set_animated(self._render_artists_animated)
+        except Exception:
+            pass
+        self._dynamic_artists.append(artist)
+        return artist
+
+    def _track_static_artist(self, artist):
+        try:
+            artist.set_animated(self._render_artists_animated)
+        except Exception:
+            pass
+        self._static_artists.append(artist)
+        return artist
+
+    def _clear_dynamic_artists(self):
+        for artist in self._dynamic_artists:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._dynamic_artists.clear()
+
+    def _schedule_draw(self):
+        if self._closed or self._draw_scheduled or not self._use_animated_render:
+            return
+        if TRACE_POWERGAUGE:
+            logging.info("PowerGauge:_schedule_draw device=%s state=%s static=%d dynamic=%d",
+                         self.device_name, self.drawanim.draw_state.name, len(self._static_artists), len(self._dynamic_artists))
+        self._draw_scheduled = True
+        self._draw_after_id = self.root.after(1, self._run_draw_stage)
+
+    def _cancel_pending_draw(self):
+        self._draw_scheduled = False
+        if self._draw_after_id:
+            try:
+                self.root.after_cancel(self._draw_after_id)
+            except Exception:
+                pass
+            self._draw_after_id = None
+
+    def _drain_draw(self, max_steps=512):
+        if self._closed:
+            return
+        if TRACE_POWERGAUGE:
+            logging.info("PowerGauge:_drain_draw device=%s begin state=%s static=%d dynamic=%d",
+                         self.device_name, self.drawanim.draw_state.name, len(self._static_artists), len(self._dynamic_artists))
+        self._draw_scheduled = False
+        if self._draw_after_id:
+            try:
+                self.root.after_cancel(self._draw_after_id)
+            except Exception:
+                pass
+            self._draw_after_id = None
+        try:
+            for _ in range(max_steps):
+                done = self.drawanim.draw_loop(pause_time=0.05, flush_events=False)
+                if TRACE_POWERGAUGE:
+                    logging.info("PowerGauge:_drain_draw device=%s step state=%s done=%s static=%d dynamic=%d",
+                                 self.device_name, self.drawanim.draw_state.name, done, len(self._static_artists), len(self._dynamic_artists))
+                if done:
+                    break
+            try:
+                self.canvas.flush_events()
+            except Exception:
+                pass
+            if TRACE_POWERGAUGE:
+                logging.info("PowerGauge:_drain_draw device=%s end state=%s", self.device_name, self.drawanim.draw_state.name)
+        except Exception as e:
+            logging.debug("PowerGauge:_drain_draw falling back to canvas.draw: %s", e)
+            self.canvas.draw()
+
+    def _run_draw_stage(self):
+        self._draw_after_id = None
+        if self._closed:
+            self._draw_scheduled = False
+            return
+        try:
+            done = self.drawanim.draw_loop(pause_time=0.008, flush_events=False)
+            if TRACE_POWERGAUGE:
+                logging.info("PowerGauge:_run_draw_stage device=%s state=%s done=%s static=%d dynamic=%d",
+                             self.device_name, self.drawanim.draw_state.name, done, len(self._static_artists), len(self._dynamic_artists))
+        except Exception as e:
+            self._draw_scheduled = False
+            logging.debug("PowerGauge:_run_draw_stage falling back to canvas.draw: %s", e)
+            self.canvas.draw()
+            return
+        if done:
+            self._draw_scheduled = False
+            return
+        self._draw_after_id = self.root.after(1, self._run_draw_stage)
+
+    def _queue_resize_refresh(self):
+        if self._closed:
+            return
+        self._invalidate_static()
+        self._cancel_pending_draw()
+        if self._resize_after_id:
+            try:
+                self.root.after_cancel(self._resize_after_id)
+            except Exception:
+                pass
+        self._resize_after_id = self.root.after(80, self._on_resize_refresh)
+
+    def _on_resize_refresh(self):
+        self._resize_after_id = None
+        if self._closed:
+            return
+        if self._last_data_history is not None:
+            self.update_gauges(self._last_data_history)
+            return
+        self.render_static_placeholder()
+
+    def _render_static_scene(self, animated=False):
+        if TRACE_POWERGAUGE:
+            logging.info("PowerGauge:_render_static_scene device=%s begin animated=%s", self.device_name, animated)
+        self._render_artists_animated = animated
+        self.ax.clear()
+        self.ax.axis('off')
+        self.ax.set_xlim(0, 6)
+        self.ax.set_ylim(0, 2.2)
+        self.ax.set_xticks([])
+        self.ax.set_yticks([])
+        for spine in self.ax.spines.values():
+            spine.set_visible(False)
+        self._static_artists.clear()
+
+        block0_x = 0.5
+        block1_x = 2.5
+        block2_x = 4.5
+        zero_y = 0.55
+
+        self.tooltip.clear_tips()
+
+        self.name_button_bounds = [-0.14, 1.98,1.70,.19]
+        self.tooltip.add_tip_box(self.name_button_bounds, "Click to change BT-1 BLE Charge Controller nickname")
+
+        self.load_button_bounds = [5.00, 2.098,.70,.09]
+        self.tooltip.add_tip_box(self.load_button_bounds, "Turn load on and off")
+
+        self.close_button_bounds = [5.84,2.098,.10,.10]
+        self.tooltip.add_tip_box(self.close_button_bounds, "Close this tab")
+
+        self.capacity_button_list = {
+                'capacity_down':  { 'arrow': '\u25BC', 'bounds': [5.20, 0.022, .08, .08], 'active': 'battery_capacity', 'up': False, },
+                'capacity_up':    { 'arrow': '\u25B2', 'bounds': [5.40, 0.022, .08, .08], 'active': 'battery_capacity', 'up': True, },
+                'batteries_up':   { 'arrow': '\u25B2', 'bounds': [5.60, 0.022, .08, .08], 'active': 'batteries', 'up': True, },
+                'batteries_down': { 'arrow': '\u25BC', 'bounds': [5.80, 0.022, .08, .08], 'active': 'batteries', 'up': False, },
+                    }
+
+        for button in self.capacity_button_list.values():
+            self.tooltip.add_tip_box(button['bounds'], f"Click to change {button['active']} {'up' if button['up'] else 'down'}")
+
+        self._track_static_artist(self.ax.text(
+            -0.15, 2.0, f"{self._current_display_name()}",
+            ha='left', va='bottom', backgroundcolor='lightgrey', fontsize=14, weight='bold'
+        ))
+
+        x, y, w, h = self.load_button_bounds
+        self.ax.add_patch(self._track_static_artist(FancyBboxPatch(
+            (x, y), w, h*.8,
+            boxstyle="round,pad=0.02, rounding_size=0.020",
+            facecolor='lightskyblue' if self.load_button_clicked else 'lightgray',
+            edgecolor='black', alpha=0.8
+        )))
+        self._track_static_artist(self.ax.text(x + w / 2, y + h*.5, "Toggle Load", ha='center', va='center', fontsize=7, weight='bold'))
+
+        x, y, w, h = self.close_button_bounds
+        self.ax.add_patch(self._track_static_artist(FancyBboxPatch(
+            (x, y), w, h*.8, boxstyle="round,pad=0.02, rounding_size=0.020",
+            facecolor='white', edgecolor='black', alpha=0.8
+        )))
+        self._track_static_artist(self.ax.text(x + w / 2, y, "\u2716", ha='center', va='bottom', fontsize=6, weight='bold'))
+
+        for button in self.capacity_button_list.values():
+            x, y, w, h = button['bounds']
+            self.ax.add_patch(self._track_static_artist(FancyBboxPatch(
+                (x, y), w, h*.8,
+                boxstyle="round,pad=0.02, rounding_size=0.020",
+                facecolor='lightgray', edgecolor='black', alpha=0.8
+            )))
+            self._track_static_artist(self.ax.text(x + w / 2, y + h*.5, button['arrow'], ha='center', va='center', fontsize=6, weight='bold'))
+
+        battery_capacity = self.active.get('battery_capacity', 8)
+        batteries = self.active.get('batteries', 1)
+        battery_button_str = f"{battery_capacity}Ah x{batteries}"
+        self._track_static_artist(self.ax.text(5.50, 0.128, battery_button_str, ha='center', va='bottom', fontsize=10, weight='bold'))
+
+        self.draw_block_static(block0_x, zero_y, gaugeType=Gaugetype.PVPS)
+        self.draw_block_static(block1_x, zero_y, gaugeType=Gaugetype.Battery)
+        self.draw_block_static(block2_x, zero_y, gaugeType=Gaugetype.Load)
+        self._static_dirty = False
+        self._ui_static_signature = self._current_ui_static_signature()
+        if TRACE_POWERGAUGE:
+            logging.info("PowerGauge:_render_static_scene device=%s end static=%d",
+                         self.device_name, len(self._static_artists))
+
+    def _placeholder_status_parts(self):
+        status_text = ""
+        status_level = "info"
+        if isinstance(self.info, dict):
+            status_text = str(self.info.get('status_text') or "")
+            status_level = str(self.info.get('status_level') or "info").lower()
+        status_color = {
+            'ok': 'darkgreen',
+            'error': 'darkred',
+            'warn': '#8a5a00',
+            'warning': '#8a5a00',
+            'info': '#204a87',
+        }.get(status_level, 'black')
+        return status_text, status_level, status_color
+
+    def _add_placeholder_banner(self, elapsed=None, animated=False, include_status=True):
+        track = self._track_dynamic_artist if animated else self._track_static_artist
+        status_text, _, status_color = self._placeholder_status_parts()
+        if include_status and status_text:
+            status_artist = track(self.ax.text(
+                3.0, 0.10,
+                status_text,
+                ha='center',
+                va='bottom',
+                fontsize=11,
+                color=status_color,
+                wrap=True,
+                bbox=dict(facecolor='white', edgecolor=status_color, boxstyle='round,pad=0.35'),
+            ))
+            self.tooltip.add_tip_artist(status_artist, "Remote bridge / controller status")
+        if elapsed is not None:
+            dynamic = (self._track_dynamic_artist if animated else self._track_static_artist)(self.ax.text(
+                3.0, 0.65,
+                f"DYNAMIC PLACEHOLDER {elapsed:0.1f}s",
+                ha='center',
+                va='center',
+                fontsize=13,
+                weight='bold',
+                color='darkred',
+                bbox=dict(facecolor='white', edgecolor='darkred', boxstyle='round,pad=0.3'),
+            ))
+            self.tooltip.add_tip_artist(dynamic, "Dynamic placeholder timer")
+            self._placeholder_text_artist = dynamic
+
+    def update_placeholder_status(self):
+        if self._closed:
+            return
+        if not self._placeholder_static_ready:
+            self.render_static_placeholder()
+            return
+
+        status_text, _, status_color = self._placeholder_status_parts()
+        self._render_artists_animated = True
+
+        for artist_name in ('_placeholder_text_artist', '_placeholder_time_artist'):
+            artist = getattr(self, artist_name)
+            if artist is not None:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+                try:
+                    self._dynamic_artists.remove(artist)
+                except ValueError:
+                    pass
+                setattr(self, artist_name, None)
+
+        if not status_text:
+            self.drawanim.reset('placeholder-status-clear')
+            self._drain_draw(max_steps=64)
+            return
+
+        status_artist = self._track_dynamic_artist(self.ax.text(
+            3.0, 0.78,
+            status_text,
+            ha='center',
+            va='center',
+            fontsize=11,
+            color=status_color,
+            wrap=True,
+            bbox=dict(facecolor='white', edgecolor=status_color, boxstyle='round,pad=0.35'),
+        ))
+        self._placeholder_text_artist = status_artist
+        timestamp_text = time.strftime("%H:%M:%S")
+        time_artist = self._track_dynamic_artist(self.ax.text(
+            3.70, 2.04,
+            f"{timestamp_text}",
+            ha='right',
+            va='bottom',
+            fontsize=10,
+            weight='bold',
+            color='#444444',
+        ))
+        self._placeholder_time_artist = time_artist
+        self.drawanim.reset('placeholder-status-update')
+        self._drain_draw(max_steps=128)
+
+    def render_static_placeholder(self):
+        if self._closed:
+            return
+        if TRACE_POWERGAUGE:
+            logging.info("PowerGauge:render_static_placeholder device=%s", self.device_name)
+        self._placeholder_active = False
+        self._placeholder_start_time = None
+        self._placeholder_text_artist = None
+        self._placeholder_time_artist = None
+        self._placeholder_static_ready = False
+        self._use_animated_render = False
+        self._render_artists_animated = False
+        self._clear_dynamic_artists()
+        self.tooltip.clear_tips()
+        self._static_dirty = True
+        self._render_static_scene(animated=False)
+        self._add_placeholder_banner(elapsed=None, animated=False, include_status=False)
+        self.canvas.draw()
+        self._placeholder_static_ready = True
+        self.update_placeholder_status()
+        try:
+            self.canvas.get_tk_widget().update_idletasks()
+        except Exception:
+            pass
+
+    def close(self):
+        self._closed = True
+        self.drawanim.close()
+        try:
+            self.tooltip._hide_tooltip()
+        except Exception:
+            pass
+        if self._watchdog_after_id:
+            try:
+                self.canvas.get_tk_widget().after_cancel(self._watchdog_after_id)
+            except Exception:
+                pass
+            self._watchdog_after_id = None
+        if self._resize_after_id:
+            try:
+                self.root.after_cancel(self._resize_after_id)
+            except Exception:
+                pass
+            self._resize_after_id = None
+        if self._clear_highlight_after_id:
+            try:
+                self.root.after_cancel(self._clear_highlight_after_id)
+            except Exception:
+                pass
+            self._clear_highlight_after_id = None
+        if self._draw_after_id:
+            try:
+                self.root.after_cancel(self._draw_after_id)
+            except Exception:
+                pass
+            self._draw_after_id = None
+        if self._placeholder_after_id:
+            try:
+                self.root.after_cancel(self._placeholder_after_id)
+            except Exception:
+                pass
+            self._placeholder_after_id = None
+
     def _watchdog_tick(self):
+        if self._closed:
+            return
         elapsed = time.time() - self.lastTime
         if not self.lastTimeText:
             return
@@ -234,9 +663,15 @@ class PowerGaugeTab:
         else:
             color = 'green'
 
-        #logging.info("PowerGauge:_watchdog_tick: elapsed=%.2f color=%s", elapsed, color)
-        self.lastTimeText.set_color(color)
-        self.root.after_idle(self.figure.canvas.draw_idle)
+        if self.lastTimeText:
+            self.lastTimeText.set_color(color)
+            if self._use_animated_render:
+                self._schedule_draw()
+            else:
+                try:
+                    self.canvas.draw_idle()
+                except Exception:
+                    self.canvas.draw()
 
     def popup_and_get_string(self, prompt="Please enter something"):
         return simpledialog.askstring("Prompt", prompt, parent=self.root)
@@ -259,6 +694,10 @@ class PowerGaugeTab:
                     nickname = self.active['device_nickname']
                     self.active['device_nickname'] = self.popup_and_get_string(f"Enter nickname for {nickname} (current: {nickname})")
                     xreport(self.device_name, 'PowerGauge', f"Nickname set to {self.active['device_nickname']}", green=True, )
+                    if self._last_data_history is not None:
+                        self.update_gauges(self._last_data_history)
+                    else:
+                        self.render_static_placeholder()
             
             if self.load_button_bounds:
                 x, y, w, h = self.load_button_bounds
@@ -272,10 +711,10 @@ class PowerGaugeTab:
                         self.controlQueues[self.device_name.lower()].put((self.device_name.lower(), 'toggle_load',))
                     self.aevents.set(self.client_task_event, None, 'load_button_clicked')
                     self.load_button_clicked = True
-                    logging.info("PowerGauge:clear_highlight: Setting load_button_clicked highlight")
+                    if TRACE_POWERGAUGE:
+                        logging.info("PowerGauge:clear_highlight: Setting load_button_clicked highlight")
                     # reset after 3800ms
                     self.update_gauges()
-                    self.root.after_idle(self.figure.canvas.draw_idle)
                     if not self._clear_highlight_after_id:
                         self._clear_highlight_after_id = self.root.after(3800, self.clear_highlight)
                 else:
@@ -304,15 +743,22 @@ class PowerGaugeTab:
                         previous_value = self.active[active]
                         self.active[active] += 1 if up else (-1 if previous_value > 1 else 0)
                         xreport(self.device_name, 'on_click', f"Capacity button clicked: {active} {previous_value} -> {self.active[active]}", blue=True, )
+                        if self._last_data_history is not None:
+                            self.update_gauges(self._last_data_history)
+                        else:
+                            self.render_static_placeholder()
                         break
         except Exception as e:
             logging.exception(f"PowerGauge:on_click: Error processing click event: {e}")
 
     def clear_highlight(self):
-        logging.info("PowerGauge:clear_highlight: Resetting load_button_clicked highlight")
+        if self._closed:
+            self._clear_highlight_after_id = None
+            return
+        if TRACE_POWERGAUGE:
+            logging.info("PowerGauge:clear_highlight: Resetting load_button_clicked highlight")
         self.load_button_clicked = False
         self.update_gauges()
-        self.root.after_idle(self.figure.canvas.draw_idle)
         if self._clear_highlight_after_id:
             self._clear_highlight_after_id = None
 
@@ -322,17 +768,11 @@ class PowerGaugeTab:
 
 
         try:
-            pvps_v = data_history['pv_voltage'][-1] if 'pv_voltage' in data_history else 0
-            pvps_a = data_history['pv_current'][-1] if 'pv_current' in data_history else 0
-            pvps_w = pvps_a * pvps_v
-
-            load_v = data_history['load_voltage'][-1] if 'load_voltage' in data_history else 0
-            load_a = data_history['load_current'][-1] if 'load_current' in data_history else 0
-            load_w = load_a * load_v
-
-            batt_v = data_history['battery_voltage'][-1] if 'battery_voltage' in data_history else 0
-            batt_a = data_history['battery_current'][-1] if 'battery_current' in data_history else 0
-            batt_w = None
+            pvps_v = self.get_val('pv_voltage', data_history)
+            pvps_a = self.get_val('pv_current', data_history)
+            load_v = self.get_val('load_voltage', data_history)
+            load_a = self.get_val('load_current', data_history)
+            batt_v = self.get_val('battery_voltage', data_history)
 
             return self.power.getPowerState(pvps_v=pvps_v, pvps_a=pvps_a,
                            load_v=load_v, load_a=load_a,
@@ -340,7 +780,7 @@ class PowerGaugeTab:
         except Exception as e:
             logging.exception(f"PowerGauge:getPowerState: Error getting power state: {e}")
             print(traceback.format_exc(), file=sys.stderr)
-            return PowerState.Unknown
+            return PowerState.UNKNOWN
 
     def get_val(self, key, data_history):
         try:
@@ -364,6 +804,45 @@ class PowerGaugeTab:
 
         return [v, c, w]
 
+    def draw_block_static(self, x0, base_y, gaugeType=None):
+        width = 0.25
+        height = 1.3
+
+        voltage_tick_step = 2 if gaugeType == Gaugetype.PVPS else 1
+        match gaugeType:
+            case Gaugetype.PVPS:
+                min_v, max_v = (11.0, 32.0)
+                label = "PV/PS"
+            case Gaugetype.Battery:
+                min_v, max_v = (11.0, 17.0)
+                label = "Battery"
+            case Gaugetype.Load:
+                min_v, max_v = (11.0, 17.0)
+                label = "Load"
+
+        block_patch = self._track_static_artist(patches.Rectangle((x0 - 0.3, base_y), 1.1, height, fill=False, edgecolor='black'))
+        self.ax.add_patch(block_patch)
+        self._track_static_artist(self.ax.text(x0 + 0.25, base_y + height + 0.02, label, ha='center', va='bottom', fontsize=9, weight='bold'))
+
+        for i in range(int(min_v), int(max_v) + 1, voltage_tick_step):
+            pos = base_y + ((i - min_v) / (max_v - min_v)) * height
+            match gaugeType:
+                case Gaugetype.PVPS | Gaugetype.Battery:
+                    self._track_static_artist(self.ax.hlines(pos, x0 - 0.35, x0 - 0.32, colors='gray', linewidth=1))
+                    self._track_static_artist(self.ax.text(x0 - 0.37, pos, f'{i}V', ha='right', va='center', fontsize=7))
+                case Gaugetype.Load:
+                    x_off = 1.2
+                    self._track_static_artist(self.ax.hlines(pos, x0 - 0.39+x_off, x0 - 0.35+x_off, colors='gray', linewidth=1))
+                    self._track_static_artist(self.ax.text(x0 - 0.36+x_off, pos, f'{i}V', ha='left', va='center', fontsize=7))
+
+        if gaugeType == Gaugetype.Battery:
+            for label_text, volt in LiFePo4.DischargeTable.items():
+                pos = base_y + ((volt - min_v) / (max_v - min_v)) * height
+                marker = self._track_static_artist(self.ax.hlines(pos, x0 + 0.5 + 0.35, x0 + 0.5 + 0.32, colors='gray', linewidth=1))
+                text = self._track_static_artist(self.ax.text(x0 + 0.5 + 0.37, pos, label_text, ha='left', va='center', fontsize=7))
+                self.tooltip.add_tip_artist(marker, 'Discharge level', name=f"battery-discharge-marker-{label_text}")
+                self.tooltip.add_tip_artist(text, 'Discharge level', name=f"battery-discharge-text-{label_text}")
+
     # XXX
     # Sample data_history: PowerGauge:update_gauges: 
     #   {'time': [(None, datetime.datetime(2025, 5, 17, 8, 20, 30, 118788)), (None, datetime.datetime(2025,   5, 17, 8, 20, 32, 482157))], 
@@ -386,9 +865,6 @@ class PowerGaugeTab:
 
         #logging.info(f"PowerGauge:drawblock {label}: v:{v} power:{power}")
 
-        block_patch = patches.Rectangle((x0 - 0.3, base_y), 1.1, height, fill=False, edgecolor='black')
-        self.ax.add_patch(block_patch)
-
         power_w = 0
 
 
@@ -400,8 +876,9 @@ class PowerGaugeTab:
             voltage = self.power.load.load_v
             power_w = self.power.load.load_w
             load_a = self.power.load.load_a
-            text = self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold', 
+            text = self._track_dynamic_artist(self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold', 
                          color='red' if self.power.load.from_batt_w else 'green',)
+                         )
             self.tooltip.add_tip_artist(text, f"Total Load power being used: {power_w:0.1f}W\nGreen if no battery power, Red if battery power used.", )
             #self.tooltip.add_tip_artist(block_patch, 'BBBB',)
             if load_a:
@@ -410,7 +887,7 @@ class PowerGaugeTab:
                 battery_capacity = self.active.get('battery_capacity', 8)
                 batteries = self.active.get('batteries', 1)
                 runtime= LiFePo4.estRuntime(percentage, battery_capacity=battery_capacity, batteries=batteries, load_a=load_a,)
-                text = self.ax.text(x0 + 0.25, base_y + height - 0.18, f"{runtime:.1f} hours", ha='center', va='bottom', fontsize=8, weight='bold')
+                text = self._track_dynamic_artist(self.ax.text(x0 + 0.25, base_y + height - 0.18, f"{runtime:.1f} hours", ha='center', va='bottom', fontsize=8, weight='bold'))
                 self.tooltip.add_tip_artist(text, f"Estimated runtime based on {battery_capacity * batteries}Ah and {load_a}A load",)
             bar1_v = znone(self.power.load.load_v)
             bar2_w = znone(self.power.load.from_batt_w)
@@ -420,9 +897,9 @@ class PowerGaugeTab:
         if gaugeType == Gaugetype.Battery:
             voltage = self.power.batt.batt_v
             power_w = self.power.batt.batt_w
-            text = self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold',
+            text = self._track_dynamic_artist(self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold',
                          color='red' if self.power.batt.to_load_w else 'green',
-                         )
+                         ))
             self.tooltip.add_tip_artist(text, f"Total Battery power: {power_w:0.1f}W\nGreen if charging, Red if discharging.", )
             if voltage >= 13.3:
                 bg_color = '#ccffcc'  # light green
@@ -437,7 +914,7 @@ class PowerGaugeTab:
 
             voltage_height = height * min((voltage - min_v) / (max_v - min_v), 1.0)
             if voltage_height > 0:
-                patch = patches.Rectangle((x0 - 0.3, base_y), 1.1, voltage_height, facecolor=bg_color, edgecolor='none', zorder=0)
+                patch = self._track_dynamic_artist(patches.Rectangle((x0 - 0.3, base_y), 1.1, voltage_height, facecolor=bg_color, edgecolor='none', zorder=0))
                 self.tooltip.add_tip_artist(patch, tooltip,)
                 self.ax.add_patch(patch)
 
@@ -448,16 +925,11 @@ class PowerGaugeTab:
             battery_capacity = self.active.get('battery_capacity', 8)
             batteries = self.active.get('batteries', 1)
 
-            text = self.ax.text(x0 + 0.25, base_y + height - 0.18, f"{battery_capacity *batteries}Ah {percentage:1.0f}%", 
-                         ha='center', va='bottom', fontsize=8, weight='bold')
+            text = self._track_dynamic_artist(self.ax.text(x0 + 0.25, base_y + height - 0.18, f"{battery_capacity *batteries}Ah {percentage:1.0f}%", 
+                         ha='center', va='bottom', fontsize=8, weight='bold'))
             self.tooltip.add_tip_artist(text, 
                     f"Battery capacity: {battery_capacity * batteries}Ah based on {batteries} {battery_capacity}Ah " +
                     f"batter{'ies' if batteries > 1 else 'y'} {percentage:1.0f}% charged",)
-
-            for label_text, volt in LiFePo4.DischargeTable.items():
-                pos = base_y + ((volt - min_v) / (max_v - min_v)) * height
-                self.tooltip.add_tip_artist(self.ax.hlines(pos, x0 + 0.5 + 0.35, x0 + 0.5 + 0.32, colors='gray', linewidth=1), 'Discharge level',)
-                self.tooltip.add_tip_artist(self.ax.text(x0 + 0.5 + 0.37, pos, label_text, ha='left', va='center', fontsize=7), 'Discharge level',)
 
             bar1_v = znone(self.power.batt.batt_v)
             bar2_w = znone(self.power.batt.from_pvps_w)
@@ -466,9 +938,9 @@ class PowerGaugeTab:
         if gaugeType == Gaugetype.PVPS:
             voltage = self.power.pvps.pvps_v
             power_w = self.power.pvps.pvps_w
-            text = self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold',
+            text = self._track_dynamic_artist(self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold',
                          color = 'red' if not self.power.pvps.to_batt_w else 'green' ,
-                         )
+                         ))
             self.tooltip.add_tip_artist(text, f"Total PVPS power being supplied: {power_w:0.1f}W", )
             bar1_v = znone(self.power.pvps.pvps_v)
             bar2_w = znone(self.power.pvps.to_load_w)
@@ -478,23 +950,13 @@ class PowerGaugeTab:
 
         #self.ax.text(x0 + 0.25, base_y + height - 0.1, f"{label} {power_w:0.1f}W", ha='center', va='bottom', fontsize=8, weight='bold')
 
-        for i in range(int(min_v), int(max_v) + 1, voltage_tick_step):
-            pos = base_y + ((i - min_v) / (max_v - min_v)) * height
-            match gaugeType:
-                case Gaugetype.PVPS | Gaugetype.Battery:
-                    self.ax.hlines(pos, x0 - 0.35, x0 - 0.32, colors='gray', linewidth=1)
-                    self.ax.text(x0 - 0.37, pos, f'{i}V', ha='right', va='center', fontsize=7)
-                case Gaugetype.Load:
-                    x_off = 1.2
-                    self.ax.hlines(pos, x0 - 0.39+x_off, x0 - 0.35+x_off, colors='gray', linewidth=1)
-                    self.ax.text(x0 - 0.36+x_off, pos, f'{i}V', ha='left', va='center', fontsize=7)
-
         def bar(x, val, maxval, label, color):
             if val <= 0:
                 return
             h = height * min(val / maxval, 1.0)
-            self.ax.add_patch(patches.Rectangle((x - 0.15, base_y), width, h, color=color, alpha=0.6))
-            self.ax.text(x + width / 2 - 0.15, base_y + h + 0.05, f'{label}', ha='center', va='bottom', fontsize=8)
+            patch = self._track_dynamic_artist(patches.Rectangle((x - 0.15, base_y), width, h, color=color, alpha=0.6))
+            self.ax.add_patch(patch)
+            self._track_dynamic_artist(self.ax.text(x + width / 2 - 0.15, base_y + h + 0.05, f'{label}', ha='center', va='bottom', fontsize=8))
 
         bar(x0, bar1_v - min_v, max_v - min_v, f'{bar1_v:.1f}V', colors[0])
         bar(x0 + 0.3, bar2_w, max_w, f'{bar2_w:.1f}W', colors[1])
@@ -507,6 +969,9 @@ class PowerGaugeTab:
         
         a, b, c, d: tuples of (x, y) coordinates
         """
+        if power is None:
+            logging.debug("PowerGauge:flow skipped: power=None info=%s", info)
+            return
         label = f"{power:.1f}W (Est.) {info if debug else ''}" 
         xl, yt = top_left
         xr, yb = bottom_right
@@ -518,7 +983,8 @@ class PowerGaugeTab:
         d = (xr, yt)            # move up to the end point
 
         #logging.info(f"PowerGauge:flow: {a} -> {b} -> {c} -> {d}")
-        logging.info(f"PowerGauge:flow: {label}")
+        if TRACE_POWERGAUGE:
+            logging.info(f"PowerGauge:flow: {label}")
         
         codes = [Path.MOVETO, Path.LINETO, Path.LINETO, Path.LINETO, Path.LINETO]
         if oneArrow:
@@ -532,7 +998,7 @@ class PowerGaugeTab:
 
         for verts in verts:
             path = Path(verts, codes[:len(verts)])
-            arrow = FancyArrowPatch(path=path, arrowstyle='->', linewidth=2, color=color, mutation_scale=10, zorder=10)
+            arrow = self._track_dynamic_artist(FancyArrowPatch(path=path, arrowstyle='->', linewidth=2, color=color, mutation_scale=10, zorder=10))
             self.ax.add_patch(arrow)
 
             #path1 = Path(verts1, codes[:len(verts1)])
@@ -542,7 +1008,7 @@ class PowerGaugeTab:
             #arrow2 = FancyArrowPatch(path=path2, arrowstyle='->', linewidth=2, color=color, mutation_scale=10, zorder=10)
             #self.ax.add_patch(arrow2)
 
-        text = self.ax.text((xl + xr) / 2, yb + 0.02, label, ha='center', fontsize=9)
+        text = self._track_dynamic_artist(self.ax.text((xl + xr) / 2, yb + 0.02, label, ha='center', fontsize=9))
         self.tooltip.add_tip_artist(text, f"Estimated power flow")
 
 
@@ -550,15 +1016,41 @@ class PowerGaugeTab:
         #if data and len(data) > 3:
         #logging.info(f"PowerGauge:update_gauges: {data['time']}")
         #logging.info(f"PowerGauge:update_gauges: {data['device_nickname']}")
+        if self._closed:
+            return
+        if data_history is None:
+            data_history = self._last_data_history
         if not data_history:
             #logging.info("PowerGauge:update_gauges: No data_history")
             return
+        self._last_data_history = data_history
+        has_samples = any(len(data_history.get(key, [])) > 0 for key in ('pv_voltage', 'battery_voltage', 'load_voltage'))
+        if has_samples != self._use_animated_render:
+            self._use_animated_render = has_samples
+            self._invalidate_static()
+        if self._ui_static_signature != self._current_ui_static_signature():
+            self._invalidate_static()
+        if TRACE_POWERGAUGE:
+            logging.info("PowerGauge:update_gauges device=%s samples pv=%d batt=%d load=%d static_dirty=%s",
+                         self.device_name,
+                         len(data_history.get('pv_voltage', [])),
+                         len(data_history.get('battery_voltage', [])),
+                         len(data_history.get('load_voltage', [])),
+                         self._static_dirty)
 
         self.lastTime = time.time()
         date_str = datetime.now().strftime("%H:%M:%S")
-
-        self.ax.clear()
-        self.ax.axis('off')
+        self._cancel_pending_draw()
+        if self._use_animated_render:
+            try:
+                self.drawanim.reset('update-gauges')
+            except Exception:
+                pass
+        self._render_artists_animated = self._use_animated_render
+        self._clear_dynamic_artists()
+        self.tooltip.clear_tips()
+        if self._static_dirty:
+            self._render_static_scene(animated=self._use_animated_render)
 
         #nickname = 'N/A'
         #if 'device_nickname' in data:
@@ -566,7 +1058,8 @@ class PowerGaugeTab:
 
         #logging.info(f"PowerGauge:update_gauges: {self.info}")
         #logging.info(f"PowerGauge:update_gauges: {self.info.values()}")
-        xreport(self.device_name, 'PowerGauge', f"Update gauges {self.info}", green=True, )
+        if TRACE_POWERGAUGE:
+            xreport(self.device_name, 'PowerGauge', f"Update gauges {self.info}", green=True, )
         #xreport(self.device_name, 'PowerGauge', f"Update gauges {self.info.values()}", green=True, )
 
         #if self.nickname:
@@ -574,91 +1067,33 @@ class PowerGaugeTab:
 
         self.tooltip.clear_tips()
 
-        try:
-            name = self.active.get('device_nickname', '')
-            if name == '':
-                if 'device_nickname' in self.info:
-                    name = self.info['device_nickname']
-                else:
-                    name = self.device_name
-
-            self.ax.text(-0.15, 2.0, f"{name}" , ha='left', va='bottom', backgroundcolor='lightgrey', fontsize=14, weight='bold')
-            self.name_button_bounds = [-0.14, 1.98,1.70,.19]  # [x, y, width, height]
-            self.tooltip.add_tip_box(self.name_button_bounds, "Click to change BT-1 BLE Charge Controller nickname")
-
-        except Exception as e:
-            logging.exception(f"PowerGauge:update_gauges: Error displaying nickname: {e}")
-            print(traceback.format_exc(), file=sys.stderr )
-
         fault_display = self.get_fault_display(data_history)
         fault_color = 'green' if fault_display == 'OK' else 'red'
-        logging.info(
-            "FAULTTRACE powergauge.update_gauges device=%s render_codes=%r render_color=%s",
-            self.device_name,
-            fault_display,
-            fault_color,
-        )
-        fault_text = self.ax.text(3.0, 2.0, fault_display, ha='center', va='bottom', fontsize=13, weight='bold', color=fault_color)
+        if TRACE_POWERGAUGE:
+            logging.info(
+                "FAULTTRACE powergauge.update_gauges device=%s render_codes=%r render_color=%s",
+                self.device_name,
+                fault_display,
+                fault_color,
+            )
+        fault_text = self._track_dynamic_artist(self.ax.text(3.0, 2.0, fault_display, ha='center', va='bottom', fontsize=13, weight='bold', color=fault_color))
         self.tooltip.add_tip_artist(fault_text, FAULT_TOOLTIP_TABLE, fixedFont=True, name="fault-status")
 
         info_values = [v for k, v in self.info.items() if v and k != 'device_nickname' and v != 'N/A' and v != '']
-        self.ax.text(-0.15, 0.092, f"{', '.join(info_values)}", ha='left', va='bottom', fontsize=10, weight='bold')
+        self._track_dynamic_artist(self.ax.text(-0.15, 0.092, f"{', '.join(info_values)}", ha='left', va='bottom', fontsize=10, weight='bold'))
 
         powerState = self.getPowerState(data_history)
         info = PowerStateHelp.get(powerState, ())
         joined = " | ".join(info[:-1])
-        text = self.ax.text(-0.15, -0.05, f"Inferred Power State: {powerState.name}", ha='left', va='bottom', fontsize=10, weight='bold')
+        text = self._track_dynamic_artist(self.ax.text(-0.15, -0.05, f"Inferred Power State: {powerState.name}", ha='left', va='bottom', fontsize=10, weight='bold'))
         powerinfo = [(p.name, PowerStateInfo[p]) for p in PowerState]                            
         table = tabulate.tabulate(powerinfo, headers=["PowerState", "Description"], tablefmt="grid")
 
         self.tooltip.add_tip_artist(text, table, fixedFont=True)
 
-        # Save the bounding box for interaction check
-        self.ax.set_xlim(-1, 7)
-        self.ax.set_ylim(-2, 3)
-
-        # Toggle load button
-        #xreport(self.device_name, 'PowerGauge', f"Update gauges", f"load_button_clicked: {self.load_button_clicked}", green=True, )
-        #self.load_button_bounds = [4.70,0.022,.70,.09]  # [x, y, width, height]
-        self.load_button_bounds = [5.00, 2.098,.70,.09]  # [x, y, width, height]
-        x, y, w, h = self.load_button_bounds
-        self.tooltip.add_tip_box(self.load_button_bounds, "Turn load on and off")
-        self.ax.add_patch(FancyBboxPatch ((x, y), w, h*.8, 
-                                          boxstyle="round,pad=0.02, rounding_size=0.020",
-                                          facecolor='lightskyblue' if self.load_button_clicked else 'lightgray', edgecolor='black', alpha=0.8))
-
-        self.ax.text(x + w / 2, y + h*.5, "Toggle Load", ha='center', va='center', fontsize=7, weight='bold')
-
-        # Close button
-        self.close_button_bounds = [5.84,2.098,.10,.10]  # [x, y, width, height]
-        x, y, w, h = self.close_button_bounds
-        self.tooltip.add_tip_box(self.close_button_bounds, "Close this tab")
-        self.ax.add_patch(FancyBboxPatch ((x, y), w, h*.8, boxstyle="round,pad=0.02, rounding_size=0.020", facecolor='white', edgecolor='black', alpha=0.8))
-        self.ax.text(x + w / 2, y, "\u2716", ha='center', va='bottom', fontsize=6, weight='bold')
-
         # Last time string
-        self.lastTimeText = self.ax.text(4.20, 2.078, f"{date_str}", ha='left', va='bottom', fontsize=10, weight='bold')
+        self.lastTimeText = self._track_dynamic_artist(self.ax.text(3.70, 2.078, f"{date_str}", ha='left', va='bottom', fontsize=10, weight='bold'))
         self.tooltip.add_tip_artist(self.lastTimeText, "Last update time")
-
-        self.capacity_button_list = {
-                'capacity_down':  { 'arrow': '\u25BC', 'bounds': [5.20, 0.022, .08, .08], 'active': 'battery_capacity', 'up': False, },
-                'capacity_up':    { 'arrow': '\u25B2', 'bounds': [5.40, 0.022, .08, .08], 'active': 'battery_capacity', 'up': True, },
-                'batteries_up':   { 'arrow': '\u25B2', 'bounds': [5.60, 0.022, .08, .08], 'active': 'batteries', 'up': True, },
-                'batteries_down': { 'arrow': '\u25BC', 'bounds': [5.80, 0.022, .08, .08], 'active': 'batteries', 'up': False, },
-                    }
-
-        # Draw capacity buttons
-        for button in self.capacity_button_list.values():
-            x, y, w, h = button['bounds']
-            self.tooltip.add_tip_box(button['bounds'], f"Click to change {button['active']} {'up' if button['up'] else 'down'}")
-            self.ax.add_patch(FancyBboxPatch((x, y), w, h*.8, boxstyle="round,pad=0.02, rounding_size=0.020", facecolor='lightgray', edgecolor='black', alpha=0.8))
-            self.ax.text(x + w / 2, y + h*.5, button['arrow'], ha='center', va='center', fontsize=6, weight='bold')
-
-        battery_capacity = self.active.get('battery_capacity', 8)
-        batteries = self.active.get('batteries', 1)
-        batteries_str = f"Ah x{batteries}" 
-        battery_button_str = f"{battery_capacity}{batteries_str}"
-        self.batteries_button = self.ax.text(5.50, 0.128, battery_button_str, ha='center', va='bottom', fontsize=10, weight='bold')
 
 
         # Draw the three gauge blocks
@@ -707,34 +1142,34 @@ class PowerGaugeTab:
                 case PowerState.noPV_Discharging_Load:
                     batt_colors = ['grey', 'white', 'red']
                     load_colors = ['lightgrey', 'red', 'white']
-                    if self.power.batt.batt_v >= 0:
+                    if self.power.batt.batt_v >= 0 and self.power.batt.to_load_w is not None:
                         self.flow((block1_x+bar2_x, zero_y), (block2_x+bar1_x, top_y), color='red', power=self.power.batt.to_load_w, info='BBBB', ) # BBBB
                     pass
                 case PowerState.PV_Charging_noLoad:
                     pvps_colors = load_color = ['grey', 'white', 'green']
                     batt_colors = ['grey', 'green', 'white']
-                    if self.power.pvps.pvps_v > 1:
+                    if self.power.pvps.pvps_v > 1 and self.power.pvps.to_batt_w is not None:
                         self.flow((block0_x+bar2_x, zero_y), (block1_x+bar1_x, top_y), color='green', power=self.power.pvps.to_batt_w, info='AAAA', ) # AAAA
                     pass
                 case PowerState.PV_Split_Load:
                     pvps_colors = load_color = ['grey', 'green', 'white']
                     batt_colors = ['grey', 'green', 'red']
                     load_colors = ['lightgrey', 'red', 'green']
-                    if self.power.batt.batt_v > 0:
+                    if self.power.batt.batt_v > 0 and self.power.batt.to_load_w is not None:
                         self.flow((block1_x+bar2_x, zero_y), (block2_x+bar1_x, top_y), color='red', power=self.power.batt.to_load_w, info='BBBB', ) # BBBB
 
-                    if self.power.pvps.pvps_v > 1 and self.power.load.load_v > 1:
+                    if self.power.pvps.pvps_v > 1 and self.power.load.load_v > 1 and self.power.load.from_pvps_w is not None:
                         self.flow((block0_x+bar1_x, zero_y), (block2_x+bar2_x, mid_y), color='green', power=self.power.load.from_pvps_w, info='DDDD', ) # DDDD
                     pass
                 case PowerState.PV_Charging_Load:
                     pvps_colors = load_color = ['grey', 'green', 'green']
                     batt_colors = ['grey', 'green', 'red']
                     load_colors = ['lightgrey', 'white', 'green']
-                    if self.power.pvps.pvps_v > 1:
+                    if self.power.pvps.pvps_v > 1 and self.power.pvps.to_batt_w is not None:
                         #self.flow((block0_x+bar2_x, zero_y), (block1_x+bar1_x, top_y), color='green', label=f'{batt_numbers[2]:.1f}W (Est.){EEEE}', ) # AAAA
                         self.flow((block0_x+bar2_x, zero_y), (block1_x+bar1_x, top_y), color='green', power=self.power.pvps.to_batt_w, info='EEEE', ) # AAAA
 
-                    if self.power.pvps.pvps_v > 1 and self.power.load.load_v > 1:
+                    if self.power.pvps.pvps_v > 1 and self.power.load.load_v > 1 and self.power.load.from_pvps_w is not None:
                         #self.flow((block0_x+bar1_x, zero_y), (block2_x+bar2_x, mid_y), color='green', label=f'{load_numbers[2]:.1f}W (Est.){FFFF}', ) # DDDD
                         self.flow((block0_x+bar1_x, zero_y), (block2_x+bar2_x, mid_y), color='green', power=self.power.load.from_pvps_w, info='DDDD', ) # DDDD
                     pass
@@ -777,7 +1212,11 @@ class PowerGaugeTab:
         #def flow(xl, yt, xr, yb, color='green'):
         self.ax.set_xlim(0, 6)
         self.ax.set_ylim(0, 2.2)
-        self.canvas.draw()
+        if not self._closed:
+            if self._use_animated_render:
+                self._schedule_draw()
+            else:
+                self.canvas.draw()
 
         return
 

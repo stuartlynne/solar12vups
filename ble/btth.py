@@ -27,6 +27,9 @@ import logging
 from lib.log import setup_logger, xreport
 logger = logging.getLogger(__name__)
 
+TRACE_BTTH = False
+EMIT_LIVE_DATA_TO_GUI = True
+
 
 BT_TH_UUIDS = {
     "0000ffd0-0000-1000-8000-00805f9b34fb": "BT_TH Write Service",
@@ -163,7 +166,7 @@ class BtThBleakClient(BleakClientEx):
 
         super(BtThBleakClient, self).__init__(device, aevents=aevents, *args, **kwargs)
 
-        self.no_data_restart_seconds = 10
+        self.no_data_restart_seconds = 4
 
         self.device_id = 255
         self.nicknames = []
@@ -189,25 +192,43 @@ class BtThBleakClient(BleakClientEx):
     async def start(self, ):
         await super(BtThBleakClient, self).start()
         try:
-            #logging.info(f"BtThBleakClient.start: {self.device_name} {self.device_id} {self.rawnicknames} index:{self.registers_index}")
-            await self.read_registers('start')
+            if self.poll_task is None or self.poll_task.done():
+                self.poll_task = asyncio.create_task(self.poll_loop(), name=f"{self.device_name}-poll")
         except Exception as e:
             logging.exception(f"Exception in BtTh.start: {e}")
+            print(traceback.format_exc(), file=sys.stderr)
+
+    async def poll_loop(self):
+        try:
+            while not self.disconnect_called and not getattr(self, 'closing', False):
+                if not getattr(self, 'is_connected', True):
+                    await asyncio.sleep(0.2)
+                    continue
+                await self.read_registers('poll')
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logging.exception(f"Exception in BtTh.poll_loop: {e}")
             print(traceback.format_exc(), file=sys.stderr)
 
 
     async def notification(self, characteristic, data, ):
         try:
-            xreport('BtThBleakClient.notification', self.device_name, f"entered", yellow=True, )
-            if self.disconnect_called:
-                xreport('BtThBleakClient.notification', self.device_name, f"disconnect_called is True", yellow=True, )
+            if TRACE_BTTH:
+                xreport('BtThBleakClient.notification', self.device_name, "entered", yellow=True, )
+            if self.disconnect_called or getattr(self, 'closing', False):
+                if TRACE_BTTH:
+                    xreport('BtThBleakClient.notification', self.device_name, "disconnect_called is True", yellow=True, )
                 return
             if self.disconnected_callback_called:
-                xreport('BtThBleakClient.notification', self.device_name, f"disconnected_callback_called is True", yellow=True, )
+                if TRACE_BTTH:
+                    xreport('BtThBleakClient.notification', self.device_name, "disconnected_callback_called is True", yellow=True, )
                 return
             # defensive test against disconnection in progress
             if not getattr(self, 'is_connected', True):
-                xreport('notification', 'not connected, ignoring notification from %s' % (uuid_to_name(sender.uuid), ), red=True, )
+                if TRACE_BTTH:
+                    xreport('notification', 'not connected, ignoring notification from %s' % (uuid_to_name(characteristic.uuid), ), red=True, )
                 return
             try:
                 _ = self.services
@@ -220,6 +241,8 @@ class BtThBleakClient(BleakClientEx):
             uuid_name = uuid_to_name(uuid)
             #self.dataQueue.put((self.device_name, uuid_name, data, ))
             index = self.registers_index
+            if index is None or index >= len(self.registers):
+                return
             try:
                 self.registers[index]['parser'](data)
             except Exception as e:
@@ -232,8 +255,6 @@ class BtThBleakClient(BleakClientEx):
                 #if control['name'] == 'Light On/Off':
                 #    # write light on/off
                 #    request = self.create_generic_read_request(self.device_id, 6, 0x120, 1)
-            await asyncio.sleep(1)
-            await self.read_registers('notification')  # restart reading registers
         except BleakError as e:
             logging.exception(f"BleakError in BtTh.notification: {e}")
             print(traceback.format_exc(), file=sys.stderr)
@@ -242,11 +263,15 @@ class BtThBleakClient(BleakClientEx):
             print(traceback.format_exc(), file=sys.stderr)
 
     async def read_registers(self, msg):
+        if self.disconnect_called or getattr(self, 'closing', False) or not getattr(self, 'is_connected', True):
+            return
 
-        logging.info(f"read_registers[{msg}]: {self.device_name} controlQeueue: {self.controlQueue.qsize()} dataQueue: {self.dataQueue.qsize()}")
+        if TRACE_BTTH:
+            logging.info(f"read_registers[{msg}]: {self.device_name} controlQeueue: {self.controlQueue.qsize()} dataQueue: {self.dataQueue.qsize()}")
         if not self.controlQueue.empty():
             control = self.controlQueue.get()
-            xreport('BtThBleakClient', self.device_name, f"read_registers: control: {control} load_status: {self.load_status}", yellow=True)
+            if TRACE_BTTH:
+                xreport('BtThBleakClient', self.device_name, f"read_registers: control: {control} load_status: {self.load_status}", yellow=True)
             if self.device_name.lower() == control[0].lower():
                 match control[1]:
                     case 'set':
@@ -262,7 +287,8 @@ class BtThBleakClient(BleakClientEx):
                             logging.info(traceback.print_exc())
                         pass
             else:
-                xreport('BtThBleakClient', self.device_name, f"read_registers: control: {control} does not match device_name: {self.device_name}", yellow=True)
+                if TRACE_BTTH:
+                    xreport('BtThBleakClient', self.device_name, f"read_registers: control: {control} does not match device_name: {self.device_name}", yellow=True)
                 return
 
 
@@ -284,9 +310,11 @@ class BtThBleakClient(BleakClientEx):
         index = self.registers_index
 
         name = self.registers[index]['name']
-        logging.info(f"read_registers[{msg}:{index}] {name} first: {self.registers_first} old: {old_index} {self.registers[index]['register']:04x}:{self.registers[index]['words']}")
-        request = self.create_generic_read_request(self.device_id, 3, self.registers[index]['register'], self.registers[index]['words']) 
-        logging.info(f"request:{request}")
+        if TRACE_BTTH:
+            logging.info(f"read_registers[{msg}:{index}] {name} first: {self.registers_first} old: {old_index} {self.registers[index]['register']:04x}:{self.registers[index]['words']}")
+        request = self.create_generic_read_request(self.device_id, 3, self.registers[index]['register'], self.registers[index]['words'])
+        if TRACE_BTTH:
+            logging.info(f"request:{request}")
 
         await self.write_gatt_char(self.BT_TH_WRITE, bytes(request), )
 
@@ -310,7 +338,9 @@ class BtThBleakClient(BleakClientEx):
 
     def queueData(self, data):
         #xreport('BtThBleakClient', self.device_name, f"queueData: {data}", yellow=True)
-        self.dataQueue.put((self.device_name, data, ))
+        self.first_data_event.set()
+        if EMIT_LIVE_DATA_TO_GUI:
+            self.dataQueue.put((self.device_name, data, ))
 
     def parse_history_info(self, bs):
         #logging.info("")
@@ -382,7 +412,7 @@ class BtThBleakClient(BleakClientEx):
             data['max_voltage_rated_current'] = (0x0a, bytes_to_int(bs, 3, 2), False)
             data['discharging_current_product_type'] = (0x0b, bytes_to_int(bs, 5, 2), False)
             #logging.info(f"model bs[7:23]: {bs[7:23]}")
-            model = (bs[7:23]).decode('utf-8').strip()
+            model = (bs[7:23]).decode('utf-8', errors='replace').strip()
             data['model'] = (0x0c, model, False)
             self.model = model
             #logging.info(f"parse_device_info: model: {self.model}")
@@ -497,16 +527,18 @@ class BtThBleakClient(BleakClientEx):
 
         fault121 = data['controller_fault_warnings_121'][1]
         fault122 = data['controller_fault_warnings_122'][1]
-        logging.info(f"faults: {fault121:04x} {fault122:04x} ")
-        xreport('BtThBleakClient', self.device_name, f"controller_faults: {fault121:04x} {fault122:04x} ", yellow=True, )
+        if TRACE_BTTH:
+            logging.info(f"faults: {fault121:04x} {fault122:04x} ")
+            xreport('BtThBleakClient', self.device_name, f"controller_faults: {fault121:04x} {fault122:04x} ", yellow=True, )
         data['controller_fault_warnings'] = (
             '0121',
             decode_controller_fault_warnings(fault121, fault122),
             False,
         )
         data['controller_fault_codes'] = ('fault-codes', decode_controller_fault_codes(fault121, fault122), False)
-        xreport('BtThBleakClient', self.device_name, f"controller_fault_warnings: {data['controller_fault_warnings']}", yellow=True, )
-        xreport('BtThBleakClient', self.device_name, f"controller_fault_warnings: {data['controller_fault_codes']}", yellow=True, )
+        if TRACE_BTTH:
+            xreport('BtThBleakClient', self.device_name, f"controller_fault_warnings: {data['controller_fault_warnings']}", yellow=True, )
+            xreport('BtThBleakClient', self.device_name, f"controller_fault_warnings: {data['controller_fault_codes']}", yellow=True, )
         #data['controller_fault_warnings'] = (0, f"{data['controller_fault_warnings_raw'][1]:08x}", False, )
 
 

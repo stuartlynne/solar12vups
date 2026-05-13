@@ -5,12 +5,12 @@ import signal
 from time import time, sleep
 from datetime import timedelta, datetime
 from bleak import BleakClient
-from bleak.exc import BleakError
+from bleak.exc import BleakError, BleakDeviceNotFoundError
 from bleak.uuids import uuid16_dict, uuid128_dict, uuidstr_to_str, register_uuids
 import random
 import platform
+import subprocess
 from functools import partial
-from bleak import BleakScanner
 from enum import Enum, IntEnum
 import traceback
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 SupportedDevices = {
 #        'Moxy5': MoxyBleakClient,
         'BT-TH': BtThBleakClient,
-        'Unknown': BleakClient,
+        'BT-1': BtThBleakClient,
 }
 
 
@@ -40,6 +40,42 @@ SupportedDevices = {
 #6e400003-b5a3-f393-e0a9-e50e24dcca9e (Handle: 9): Nordic UART TX (notify), Value: None
 
 statistics = {}
+startup_lock = asyncio.Lock()
+CONNECT_TIMEOUT_SECONDS = 6.0
+FIRST_DATA_TIMEOUT_SECONDS = 6.0
+
+
+def cleanup_linux_ble_device(device, remove=False):
+    if platform.system() != 'Linux':
+        return
+
+    address = getattr(device, "address", None)
+    if not address:
+        return
+
+    try:
+        subprocess.run(
+            ['bluetoothctl', 'disconnect', address],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+    if remove:
+        try:
+            subprocess.run(
+                ['bluetoothctl', 'remove', address],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            pass
+
 
 supported_characteristics = {
     'Battery Service': {
@@ -216,7 +252,7 @@ def get_bleak_client_class(device_name: str):
     for prefix, client_class in SupportedDevices.items():
         if device_name.startswith(prefix):
             return client_class
-    return SupportedDevices["Unknown"]
+    return None
 
 
 # disconnected_callback is called when the device is disconnected, set the disconnect_event to notify the device_task to stop
@@ -232,93 +268,165 @@ def disconnected_callback(client, aevents=None, device_name=None, disconnect_eve
 
 async def device_task(device, active=None, aevents=None, controlQueue=None, dataQueue=None,  ):
     device_name = device.name
-    if not controlQueue or not dataQueue:
+    device_address = getattr(device, "address", None)
+    if controlQueue is None or dataQueue is None:
         print('device_task: controlQueue and dataQueue must be provided')
         raise ValueError("controlQueue and dataQueue must be provided")
 
     logging.info(f"device_task: %s controlQueue: %s dataQueue: %s" % (device_name, controlQueue, dataQueue, ))
+
+    def emit_ui_event(event_name, **fields):
+        try:
+            payload = {'__ui_event__': (None, event_name, False)}
+            payload.update(fields)
+            dataQueue.put((device_name, payload))
+        except Exception:
+            pass
+
+    def emit_status(message, level="info"):
+        emit_ui_event(
+            'device_status',
+            status_text=(0, message, False),
+            status_level=(0, level, False),
+        )
+
     try:
         xreport(device_name, 'device_task starting', blue=True, )
         client_task_event = f"{device_name.strip()}_client_task_event"
-        await aevents.wait(client_task_event, timeout=0.001, )  # creates the event
+        aevents.ensure_event(client_task_event)
+        emit_ui_event('device_ready')
+        emit_status('BLE device discovered. Waiting to connect.', level='info')
 
         while not aevents.is_shutdown():
+            client = None
+            restart_client = False
             try:
+                aevents.clear(client_task_event)
+                device_name = device.name
                 bleak_client = get_bleak_client_class(device_name)
-                async with bleak_client(device, active=None, aevents=aevents, controlQueue=controlQueue, dataQueue=dataQueue, timeout=10.0,
-                                        disconnected_callback=partial(disconnected_callback, aevents=aevents, device_name=device_name, disconnect_event=client_task_event)
-                                        ) as client:
+                if bleak_client is None:
+                    xreport(device_name, 'device_task', 'Unsupported device name, skipping', yellow=True, )
+                    return
+                client = bleak_client(
+                    device,
+                    active=None,
+                    aevents=aevents,
+                    controlQueue=controlQueue,
+                    dataQueue=dataQueue,
+                    bleak_target=device_address,
+                    timeout=10.0,
+                    disconnected_callback=partial(
+                        disconnected_callback,
+                        aevents=aevents,
+                        device_name=device_name,
+                        disconnect_event=client_task_event,
+                    ),
+                )
+                async with startup_lock:
+                    xreport(device_name, 'device_task', 'Connecting', blue=True)
+                    emit_status('Connecting to BLE device.', level='info')
+                    await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT_SECONDS)
+                    xreport(device_name, 'Start',  blue=True, )
+                    await client.start()
                     try:
-                        if False:
-                            result = await device_explore(client, device, aevents, )
-                            xreport(client_task_event, 'waiting for stop event')
-                            await aevents.wait(client_task_event, timeout=1.0, )  # wait for the task to be stopped
-                            aevents.clear(client_task_event)  # reset the event so we can wait again
+                        dataQueue.put((device_name, {'__ui_event__': (None, 'device_ready', False)}))
+                    except Exception:
+                        pass
+                    emit_status('BLE connected. Waiting for first telemetry.', level='info')
+                    try:
+                        await asyncio.wait_for(client.first_data_event.wait(), timeout=FIRST_DATA_TIMEOUT_SECONDS)
+                        aevents.clear(client_task_event)
+                        emit_status('BLE connected. Telemetry active.', level='ok')
+                    except asyncio.TimeoutError:
+                        xreport(device_name, 'device_task', 'No first data, restarting client', red=True)
+                        emit_status('BLE connected, but no telemetry arrived. Retrying.', level='error')
+                        restart_client = True
+                try:
+                    if False:
+                        result = await device_explore(client, device, aevents, )
+                        xreport(client_task_event, 'waiting for stop event')
+                        await aevents.wait(client_task_event, timeout=1.0, )
+                        aevents.clear(client_task_event)
 
-                        xreport(device_name, 'Start',  blue=True, )
-                        await client.start()
+                    if restart_client:
+                        cleanup_linux_ble_device(device, remove=False)
+                        continue
+                    status = aevents.status(client_task_event)
+                    if status == aevents.EventStatus.SET:
+                        xreport(device_name, client_task_event, f"Event {status}, retrying client", blue=True, )
+                        emit_status('BLE session reset requested. Retrying.', level='warn')
+                        restart_client = True
+                        cleanup_linux_ble_device(device, remove=False)
+                        continue
+                    xreport(device_name, 'Wait for shutdown',  blue=True, )
+
+                    while not aevents.is_shutdown():
+                        result = await aevents.wait(client_task_event, timeout=5.0, )
                         status = aevents.status(client_task_event)
+                        aevents.clear(client_task_event)
+                        if status == aevents.EventStatus.TIMEOUT:
+                            if client.no_data_restart_needed():
+                                xreport(device_name, client_task_event, 'No data received, restarting client', red=True, )
+                                emit_status('BLE telemetry stalled. Retrying connection.', level='error')
+                                restart_client = True
+                                try:
+                                    if client.is_connected:
+                                        await client.disconnect()
+                                except Exception:
+                                    pass
+                                cleanup_linux_ble_device(device, remove=False)
+                                break
+                            continue
                         if status == aevents.EventStatus.SET:
-                            xreport(device_name, client_task_event, f"Event {status}, exiting loop", blue=True, )
-                            break
-                        xreport(device_name, 'Wait for shutdown',  blue=True, )
-
-                        # Wait for:
-                        #   - monitor for lack of data, will restart if no data received for a while
-                        #   - stop event to be set, which will stop the task
-                        #   - disconnect - this will be handled by the disconnected_callback which will set the client_task_event
-                        #
-                        while not aevents.is_shutdown():
-                            result = await aevents.wait(client_task_event, timeout=5.0, )  # wait for the task to be stopped
-                            status = aevents.status(client_task_event)
-                            #xreport(device_name, client_task_event, 'wait status: %s is_set: %s' % (status, aevents.is_set(client_task_event)), blue=True, )
-                            aevents.clear(client_task_event)  # reset the event so we can wait again
-                            if status == aevents.EventStatus.TIMEOUT:
-                                if client.no_data_restart_needed():
-                                    xreport(device_name, client_task_event, 'No data received, restarting client', red=True, )
-                                    break
-                                continue
-                            if status == aevents.EventStatus.SET:
-                                xreport(device_name, client_task_event, f"Event {status}", blue=True, )
-                                continue
-                            break
-                                    #print('device_task status: %s' % (status, ), file=sys.stderr)
-                            #if aevents.is_shutdown():
-                            #    xreport(device_name, 'device_task', 'Shutdown event set, exiting', yellow=True, )
-                            #    break
-                            xreport(device_name, 'device_task', 'Waiting for stop event', blue=True, )
-                    except Exception as e:
-                        logging.exception('Exception in device_task')
-                        print(traceback.format_exc(), file=sys.stderr)
+                            xreport(device_name, client_task_event, f"Event {status}", blue=True, )
+                            emit_status('BLE device disconnected. Waiting to reconnect.', level='warn')
+                            continue
                         break
-                    finally:
-                        try:
-                            xreport(device_name, 'device_task', 'Finally Disconnecting', blue=True, )
-                            if client.is_connected:
-                                await client.disconnect()
-                                xreport(device_name, 'device_task', 'Finally Disconnecting', yellow=True, )
-                        except Exception as e:
-                            xreport(device_name, 'device_task', 'Exception %s' % (e, ), red=True, )
-                            print(traceback.format_exc(), file=sys.stderr)
+                except Exception as e:
+                    logging.exception('Exception in device_task')
+                    print(traceback.format_exc(), file=sys.stderr)
+                    break
+                finally:
+                    try:
+                        xreport(device_name, 'device_task', 'Finally Disconnecting', blue=True, )
+                        if client.is_connected:
+                            await client.disconnect()
+                            xreport(device_name, 'device_task', 'Finally Disconnecting', yellow=True, )
+                        cleanup_linux_ble_device(device, remove=False)
+                    except Exception as e:
+                        xreport(device_name, 'device_task', 'Exception %s' % (e, ), red=True, )
+                        print(traceback.format_exc(), file=sys.stderr)
 
                 xreport(device_name, 'device_task', 'Normal Disconnect', grey=True, )
+                if restart_client and not aevents.is_shutdown():
+                    continue
             
             # catch exceptions and retry or exit as necessary
             except asyncio.exceptions.TimeoutError as e:
-                xreport('Connection', 'Timeout e: %s NORMAL')
-                #print(traceback.format_exc(), file=sys.stderr)
-                #self.task_stop_event.set()
+                xreport(device_name, 'device_task', 'Connect timeout, retrying', red=True)
+                try:
+                    if client is not None and client.is_connected:
+                        await client.disconnect()
+                except Exception:
+                    pass
+                cleanup_linux_ble_device(device, remove=False)
+                await asyncio.sleep(2)
                 continue
             except BleakError as e:
                 logging.exception('BleakError waiting for client.connect')
-                xreport('BleakError waiting for client.connect e: %s NORMAL' % (e), yellow=True, )
+                xreport(device_name, 'device_task', f'BleakError {e}, retrying', yellow=True)
                 print(traceback.format_exc(), file=sys.stderr)
-                #self.task_stop_event.set()
-                return
+                cleanup_linux_ble_device(device, remove=False)
+                if isinstance(e, BleakDeviceNotFoundError):
+                    await asyncio.sleep(5)
+                else:
+                    await asyncio.sleep(2)
+                continue
             except Exception as e:
                 logging.exception('Exception waiting for client.connect')
                 print(traceback.format_exc(), file=sys.stderr)
-                #self.task_stop_event.set()
+                cleanup_linux_ble_device(device, remove=False)
+                await asyncio.sleep(2)
                 continue
 
             xreport(device_name, 'device_task', 'exiting with', yellow=True, )
@@ -340,4 +448,3 @@ async def device_task(device, active=None, aevents=None, controlQueue=None, data
         finally:
             xreport(device.name, 'device_task', 'finished', yellow=True)
         return True
-
