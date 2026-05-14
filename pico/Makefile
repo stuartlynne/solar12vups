@@ -1,4 +1,4 @@
-PORT ?= $(if $(wildcard ./ttyACM0),./ttyACM0,/dev/ttyACM0)
+PORT ?= auto
 BRIDGE_NAME ?= pico-192-168-40-81
 WIFI_SSID ?= wimsey
 WIFI_PASSWORD ?= aa.bb.cc.dd

@@ -47,13 +47,13 @@ extra wall warts or wiring inside the remote box.
 By using these resistors, you form a voltage divider that clips the Wanderer's 5V signal down to a safe 3.33V, 
 protecting the Pico's sensitive GPIO input without needing the Waveshare transceiver chip.text
 
-Wanderer RJ12 Pin 1 (TX 5V) ───────[ 1kΩ Resistor ]───────┬───────► Pico GPIO RX Pin (3.3V Safe)
+Wanderer RJ12 Pin 1 White (TX 5V) ───────[ 1kΩ Resistor ]───────┬───────► Pico GPIO RX Pin (3.3V Safe)
                                                           │
                                                     [ 2kΩ Resistor ]
                                                           │
-Wanderer RJ12 Pin 3 (GND) ────────────────────────────────┴───────► Pico System GND Pin
+Wanderer RJ12 Pin 3 Red   (GND) ────────────────────────────────┴───────► Pico System GND Pin
 
-Wanderer Pin 2 (RX): Connects directly to the Pico's hardware UART TX pin (no resistors needed, as the Wanderer will recognize the Pico's native 3.3V output as a logic High).
+Wanderer RJ12 Pin 2 Black (RX): Connects directly to the Pico's hardware UART TX pin (no resistors needed, as the Wanderer will recognize the Pico's native 3.3V output as a logic High).
 
 Wanderer Pins 5 & 6 (12V VCC): Ensure these are cleanly trimmed, capped, or insulated so they cannot touch the components.
 

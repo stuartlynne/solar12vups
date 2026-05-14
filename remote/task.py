@@ -23,6 +23,20 @@ async def remote_server_task(active=None, shutdown=None, aevents=None, controlQu
     controlQueues = controlQueues if controlQueues is not None else {}
     hub = BridgeHub()
     sessions = {}
+    session_objs = {}
+
+    def on_bridge_registered(bridge_name):
+        session = session_objs.get(bridge_name)
+        if session is not None:
+            session.emit_status("Pico bridge connected. Waiting for Wanderer response.", level="info")
+
+    def on_bridge_unregistered(bridge_name):
+        session = session_objs.get(bridge_name)
+        if session is not None:
+            session.emit_status("Pico bridge disconnected from host.", level="error")
+
+    hub.on_register = on_bridge_registered
+    hub.on_unregister = on_bridge_unregistered
     server = await start_bridge_server(hub, host=host, port=port)
     sockets = ", ".join(str(sock.getsockname()) for sock in server.sockets or [])
     xreport("RemoteServer", "listen", sockets, green=True)
@@ -43,12 +57,14 @@ async def remote_server_task(active=None, shutdown=None, aevents=None, controlQu
                         controlQueue=control_queue,
                         dataQueue=dataQueue,
                     )
+                    session_objs[bridge_name] = session
                     sessions[bridge_name] = asyncio.create_task(session.run(), name=f"remote-{bridge_name}")
                     xreport("RemoteServer", bridge_name, "session started", blue=True)
 
             finished = [name for name, task in sessions.items() if task.done() and not hub.has_bridge(name)]
             for bridge_name in finished:
                 sessions.pop(bridge_name, None)
+                session_objs.pop(bridge_name, None)
 
             try:
                 hub.connection_event.clear()

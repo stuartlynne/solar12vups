@@ -215,15 +215,19 @@ def bridge_loop(sock, uart):
                 raise OSError("unexpected request type")
             debug("modbus request {} bytes {}".format(len(payload), payload.hex()), sock)
 
-            while uart.read():
-                pass
+            try:
+                while uart.read():
+                    pass
 
-            uart.write(payload)
-            response = read_modbus_response(uart, payload, CONFIG["modbus_timeout_ms"])
-            if not validate_crc(response):
-                raise OSError("bad modbus crc in response")
-            debug("modbus response {} bytes {}".format(len(response), response.hex()), sock)
-            write_frame(sock, MSG_MODBUS_RESPONSE, response)
+                uart.write(payload)
+                response = read_modbus_response(uart, payload, CONFIG["modbus_timeout_ms"])
+                if not validate_crc(response):
+                    raise OSError("bad modbus crc in response")
+                debug("modbus response {} bytes {}".format(len(response), response.hex()), sock)
+                write_frame(sock, MSG_MODBUS_RESPONSE, response)
+            except Exception as exc:
+                debug("request exception {}".format(exc), sock)
+                write_frame(sock, MSG_ERROR, str(exc).encode("utf-8"))
     finally:
         try:
             health.close()

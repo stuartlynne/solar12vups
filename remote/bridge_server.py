@@ -79,6 +79,8 @@ class BridgeHub:
     def __init__(self):
         self.connections = {}
         self.connection_event = asyncio.Event()
+        self.on_register = None
+        self.on_unregister = None
 
     async def register(self, connection):
         existing = self.connections.get(connection.bridge_name)
@@ -87,11 +89,21 @@ class BridgeHub:
         self.connections[connection.bridge_name] = connection
         self.connection_event.set()
         logger.info("BridgeHub registered %s", connection.bridge_name)
+        if self.on_register is not None:
+            try:
+                self.on_register(connection.bridge_name)
+            except Exception:
+                logger.exception("BridgeHub on_register callback failed for %s", connection.bridge_name)
 
     async def unregister(self, connection):
         if self.connections.get(connection.bridge_name) is connection:
             self.connections.pop(connection.bridge_name, None)
             logger.info("BridgeHub unregistered %s", connection.bridge_name)
+            if self.on_unregister is not None:
+                try:
+                    self.on_unregister(connection.bridge_name)
+                except Exception:
+                    logger.exception("BridgeHub on_unregister callback failed for %s", connection.bridge_name)
 
     def bridge_names(self):
         return sorted(self.connections.keys())

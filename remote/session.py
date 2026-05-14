@@ -92,6 +92,8 @@ class RemoteBtThSession:
 
     def describe_error(self, exc):
         if isinstance(exc, TimeoutError) or isinstance(exc, asyncio.TimeoutError):
+            if not self.hub.has_bridge(self.bridge_name):
+                return "Pico bridge disconnected from host.", "error"
             return "Pico connected. Wanderer did not respond to Modbus request.", "error"
 
         message = str(exc)

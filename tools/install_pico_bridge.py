@@ -5,6 +5,7 @@
 #
 
 import argparse
+import glob
 import os
 import subprocess
 import tempfile
@@ -35,6 +36,50 @@ def run_mpremote(args):
     subprocess.run(["mpremote"] + args, check=True)
 
 
+def detect_connect_target(connect_target):
+    if connect_target != "auto":
+        return connect_target
+
+    patterns = [
+        "/dev/serial/by-id/usb-MicroPython_Board_in_*",
+        "/dev/serial/by-id/usb-MicroPython_*",
+    ]
+    matches = []
+    for pattern in patterns:
+        matches.extend(sorted(glob.glob(pattern)))
+
+    # De-duplicate while preserving order.
+    unique_matches = []
+    seen = set()
+    for match in matches:
+        real = os.path.realpath(match)
+        if real in seen:
+            continue
+        seen.add(real)
+        unique_matches.append(match)
+
+    if len(unique_matches) == 1:
+        return unique_matches[0]
+
+    if len(unique_matches) > 1:
+        raise SystemExit(
+            "Multiple MicroPython serial devices found. "
+            "Specify --connect explicitly.\n  " + "\n  ".join(unique_matches)
+        )
+
+    tty_matches = sorted(glob.glob("/dev/ttyACM*"))
+    if len(tty_matches) == 1:
+        return tty_matches[0]
+
+    if len(tty_matches) > 1:
+        raise SystemExit(
+            "Multiple ttyACM devices found and no unique MicroPython by-id match exists. "
+            "Specify --connect explicitly.\n  " + "\n  ".join(tty_matches)
+        )
+
+    raise SystemExit("No MicroPython serial device found. Specify --connect explicitly.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Install the Solar12VUPS Pico bridge via mpremote")
     parser.add_argument("--connect", default="auto", help="mpremote connect target, e.g. /dev/ttyACM0")
@@ -56,6 +101,7 @@ def main():
     parser.add_argument("--wifi-timeout-s", type=int, default=20)
     parser.add_argument("--soft-reset", action="store_true")
     args = parser.parse_args()
+    args.connect = detect_connect_target(args.connect)
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     pico_dir = os.path.join(repo_root, "pico")
