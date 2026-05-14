@@ -24,6 +24,8 @@ from lib.log import xreport
 
 logger = logging.getLogger(__name__)
 
+ENABLE_REMOTE_BATTERY_INFO = False
+
 
 class RemoteBtThSession:
     battery_info_registers = [
@@ -71,8 +73,11 @@ class RemoteBtThSession:
             {'name': 'Device Info', 'register': 0x0a, 'words': 0x10, 'parser': self.parse_device_info, 'once': True},
             {'name': 'Device Address', 'register': 0x1a, 'words': 1, 'parser': self.parse_device_address, 'once': True},
             {'name': 'History Info', 'register': 0x10b, 'words': 23, 'parser': self.parse_history_info, 'modulus': [4, 0]},
-            {'name': 'Battery Info', 'register': 0xe001, 'words': 40, 'parser': self.parse_battery_info, 'modulus': [4, 2]},
         ]
+        if ENABLE_REMOTE_BATTERY_INFO:
+            self.registers.append(
+                {'name': 'Battery Info', 'register': 0xe001, 'words': 40, 'parser': self.parse_battery_info, 'modulus': [4, 2]}
+            )
 
     def queueData(self, data):
         if self.dataQueue is not None:
@@ -183,13 +188,17 @@ class RemoteBtThSession:
         old_index = self.registers_index
         self.registers_index = 0 if self.registers_index is None else self.registers_index + 1
 
-        if self.registers_first or self.model is None or self.device_nickname is None or self.register_reads_reset % 10 == 0:
+        if self.registers_first or self.model is None or self.device_nickname is None:
             if self.registers_index >= len(self.registers):
                 self.registers_index = 0
                 self.registers_first = False
                 self.register_reads_reset += 1
         else:
-            if self.registers_index >= 3:
+            # After initial discovery, stay on the two live telemetry reads:
+            # Charging Info and Load State. Device Info is static enough that
+            # re-reading it every cycle is unnecessary and has been observed to
+            # stall the bridge path on this controller.
+            if self.registers_index >= 2:
                 self.registers_index = 0
                 self.register_reads_reset += 1
 

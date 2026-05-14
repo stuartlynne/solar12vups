@@ -8,6 +8,16 @@ import time
 SENTINEL = ("__BLE_IO_STOP__", None)
 
 
+def _merge_device_payload(existing, incoming):
+    if existing is None:
+        return incoming
+    if not isinstance(existing, dict) or not isinstance(incoming, dict):
+        return incoming
+    merged = dict(existing)
+    merged.update(incoming)
+    return merged
+
+
 def ble_data_io_worker(input_queue, output_queue, stop_event, flush_interval=0.1):
     pending = {}
     last_flush = time.monotonic()
@@ -20,6 +30,9 @@ def ble_data_io_worker(input_queue, output_queue, stop_event, flush_interval=0.1
             output_queue.put((device_name, data))
         pending.clear()
         last_flush = time.monotonic()
+
+    def is_ui_event(data):
+        return isinstance(data, dict) and '__ui_event__' in data
 
     while not stop_event.is_set():
         timeout = max(0.01, flush_interval - (time.monotonic() - last_flush))
@@ -36,7 +49,12 @@ def ble_data_io_worker(input_queue, output_queue, stop_event, flush_interval=0.1
             continue
 
         device_name, data = item
-        pending[device_name] = data
+        if is_ui_event(data):
+            flush()
+            output_queue.put((device_name, data))
+            last_flush = time.monotonic()
+            continue
+        pending[device_name] = _merge_device_payload(pending.get(device_name), data)
 
         while True:
             try:
@@ -51,7 +69,12 @@ def ble_data_io_worker(input_queue, output_queue, stop_event, flush_interval=0.1
                 continue
 
             next_device_name, next_data = next_item
-            pending[next_device_name] = next_data
+            if is_ui_event(next_data):
+                flush()
+                output_queue.put((next_device_name, next_data))
+                last_flush = time.monotonic()
+                continue
+            pending[next_device_name] = _merge_device_payload(pending.get(next_device_name), next_data)
 
         if time.monotonic() - last_flush >= flush_interval:
             flush()

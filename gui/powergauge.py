@@ -1182,7 +1182,7 @@ class PowerGaugeTab:
         powerState = self.getPowerState(data_history)
         status_text = str(self.info.get('status_text') or '').strip()
         status_level = str(self.info.get('status_level') or 'info').lower()
-        if not has_samples and status_text:
+        if status_text:
             status_color = {
                 'ok': 'darkgreen',
                 'error': 'darkred',

@@ -17,6 +17,7 @@ import traceback
 from gui.frameex import FrameEx
 from gui.labelex import LabelEditEx
 from gui.settingstab import SettingsTab
+from gui.historytab import HistoryTab
 from gui.powergauge import PowerGaugeTab
 
 import logging
@@ -168,6 +169,16 @@ class SolarMonitorApp:
     def enqueue_data_received(self, device_name, data):
         self.ui_update_queue.put((device_name, data))
 
+    @staticmethod
+    def _merge_pending_data(existing, incoming):
+        if existing is None:
+            return incoming
+        if not isinstance(existing, dict) or not isinstance(incoming, dict):
+            return incoming
+        merged = dict(existing)
+        merged.update(incoming)
+        return merged
+
     def process_ui_updates(self):
         try:
             if self.incoming_queue is not None:
@@ -176,13 +187,19 @@ class SolarMonitorApp:
                     if '__ui_event__' in data:
                         self.on_data_received(device_name, data)
                         continue
-                    self.pending_ui_updates[device_name] = data
+                    self.pending_ui_updates[device_name] = self._merge_pending_data(
+                        self.pending_ui_updates.get(device_name),
+                        data,
+                    )
             while True:
                 device_name, data = self.ui_update_queue.get_nowait()
                 if '__ui_event__' in data:
                     self.on_data_received(device_name, data)
                     continue
-                self.pending_ui_updates[device_name] = data
+                self.pending_ui_updates[device_name] = self._merge_pending_data(
+                    self.pending_ui_updates.get(device_name),
+                    data,
+                )
         except queue.Empty:
             pass
         finally:
@@ -362,12 +379,14 @@ class SolarMonitorApp:
             text="Operating Values",
             labels={0x0121: "Controller Faults"},
         )
+        history_tab = HistoryTab(device_name=device_name, tab_control=notebook, text="History")
 
         self.device_notebooks[device_name] = {
             'notebook': notebook,
             'powergauge_tab': powergauge_tab,
             'settings_tab': settings_tab,
             'values_tab': values_tab,
+            'history_tab': history_tab,
             'data_history': data_history,
             'container': container,
             'close_button': close_button,
@@ -582,6 +601,7 @@ class SolarMonitorApp:
          
         if 'battery_voltage' in data or 'controller_fault_warnings_122' in data or 'controller_fault_warnings_121' in data:
             devinfo['powergauge_tab'].update_gauges(data_history=data_history)
+            devinfo['history_tab'].update_history(data_history)
         if any(item[0] in devinfo['values_tab'].widgets for item in data.values() if isinstance(item, tuple) and len(item) >= 1):
             devinfo['values_tab'].update_tab_display(data=data, msg="Operating Values")
         if 'voltage_settings' in data:
