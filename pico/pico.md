@@ -6,13 +6,13 @@ To safely connect the two, we need to use a voltage divider to step down the 5V 
 
         PICO PHYSICAL PINS (Top Left Edge)
         ┌──────────────────────────────────────────────────┐
-        │  ● Pin 1 (GPIO 0 / TX) ───────────────────────────► RJ12 Pin 2 (RX)           
+        │  ● Pin 1 (GPIO 0 / TX) ───────────────────────────────► RJ12 Pin 2 (RX)           
         │                                                  │
-        │  ● Pin 3 (GND) ◄────────────┬────────────────────── RJ12 Pin 3 (GND)
+        │  ● Pin 3 (GND) ◄────────────┬────────────────────────── RJ12 Pin 3 (GND)
         │                             │                    │
         │                             └─[ 3.9kΩ Resistor ] │  (Pulls 5V down to safe 3.6V)
         │                                                │ │
-        │  ● Pin 2 (GPIO 1 / RX) ◄────┬──────────────────┘ │
+        │  ● Pin 2 (GPIO 1 / RX) ◄────┬──────────────────┘────────[ 1.5kΩ Resistor ] ◄─ RJ12 Pin 1 (TX, 5V) 
         │                             │                    │
         │  ● Pin 4 (GPIO 2 / NC ) ◄─────────┴─[ 1.5kΩ Resistor ] ◄─ RJ12 Pin 1 (TX, 5V)                   
         │                                                  │  (Anchor Tag: Bridge Pin 2 to Pin 4)
@@ -47,14 +47,18 @@ extra wall warts or wiring inside the remote box.
 By using these resistors, you form a voltage divider that clips the Wanderer's 5V signal down to a safe 3.33V, 
 protecting the Pico's sensitive GPIO input without needing the Waveshare transceiver chip.text
 
-Wanderer RJ12 Pin 1 White (TX 5V) ───────[ 1kΩ Resistor ]───────┬───────► Pico GPIO RX Pin (3.3V Safe)
+Wanderer RJ12 Pin 1 White (TX 5V) ───────[ 1.5kΩ Resistor ]──────────────► Pico GPIO RX Pin 1 (3.3V Safe)
                                                           │
-                                                    [ 2kΩ Resistor ]
+                                                    [ 4.2kΩ Resistor ]
                                                           │
-Wanderer RJ12 Pin 3 Red   (GND) ────────────────────────────────┴───────► Pico System GND Pin
+Wanderer RJ12 Pin 3 Red   (GND) ◄──────────────────────────────────────► Pico System GND Pin 3
 
-Wanderer RJ12 Pin 2 Black (RX): Connects directly to the Pico's hardware UART TX pin (no resistors needed, as the Wanderer will recognize the Pico's native 3.3V output as a logic High).
+Wanderer RJ12 Pin 2 Black (RX): ◄────────────────────────────────────── Pico GPIO TX pin 2 
 
 Wanderer Pins 5 & 6 (12V VCC): Ensure these are cleanly trimmed, capped, or insulated so they cannot touch the components.
+
+
+
+
 
 
