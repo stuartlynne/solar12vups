@@ -7,6 +7,7 @@
 import asyncio
 import json
 
+from pico import keepalive
 from remote.bridge_protocol import (
     MSG_ERROR,
     MSG_HELLO,
@@ -33,6 +34,12 @@ class BridgeConnection:
         self.hello = {}
         self.request_lock = asyncio.Lock()
         self.response_queue = asyncio.Queue()
+        try:
+            sock = writer.get_extra_info("socket")
+            if sock is not None:
+                keepalive.set(sock, after_idle_sec=2, interval_sec=1, max_fails=3)
+        except Exception:
+            logger.exception("failed to configure TCP keepalive for bridge peer %s", self.peername)
 
     async def run(self):
         message_type, payload = await read_frame(self.reader)
@@ -65,7 +72,19 @@ class BridgeConnection:
         async with self.request_lock:
             logger.info("BRIDGETRACE host send_request bridge=%s bytes=%d hex=%s", self.bridge_name, len(payload), payload.hex())
             await write_frame(self.writer, MSG_MODBUS_REQUEST, payload)
-            message_type, response_payload = await asyncio.wait_for(self.response_queue.get(), timeout=timeout)
+            try:
+                message_type, response_payload = await asyncio.wait_for(self.response_queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.info("BRIDGETRACE host request_timeout bridge=%s", self.bridge_name)
+                try:
+                    await self.hub.unregister(self)
+                except Exception:
+                    pass
+                try:
+                    self.writer.close()
+                except Exception:
+                    pass
+                raise
             if message_type == MSG_MODBUS_RESPONSE:
                 logger.info("BRIDGETRACE host recv_response bridge=%s bytes=%d hex=%s", self.bridge_name, len(response_payload), response_payload.hex())
                 return response_payload

@@ -174,18 +174,14 @@ class SolarMonitorApp:
                 while True:
                     device_name, data = self.incoming_queue.get_nowait()
                     if '__ui_event__' in data:
-                        event_value = data['__ui_event__'][1] if isinstance(data['__ui_event__'], tuple) and len(data['__ui_event__']) > 1 else data['__ui_event__']
-                        if event_value == 'device_ready':
-                            self.on_data_received(device_name, data)
-                            continue
+                        self.on_data_received(device_name, data)
+                        continue
                     self.pending_ui_updates[device_name] = data
             while True:
                 device_name, data = self.ui_update_queue.get_nowait()
                 if '__ui_event__' in data:
-                    event_value = data['__ui_event__'][1] if isinstance(data['__ui_event__'], tuple) and len(data['__ui_event__']) > 1 else data['__ui_event__']
-                    if event_value == 'device_ready':
-                        self.on_data_received(device_name, data)
-                        continue
+                    self.on_data_received(device_name, data)
+                    continue
                 self.pending_ui_updates[device_name] = data
         except queue.Empty:
             pass
