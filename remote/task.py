@@ -28,6 +28,7 @@ async def remote_server_task(active=None, shutdown=None, aevents=None, controlQu
     def on_bridge_registered(bridge_name):
         session = session_objs.get(bridge_name)
         if session is not None:
+            session.force_identity_refresh()
             session.emit_status("Pico bridge connected. Waiting for Wanderer response.", level="info")
 
     def on_bridge_unregistered(bridge_name):

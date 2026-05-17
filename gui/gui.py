@@ -90,6 +90,7 @@ class SolarMonitorApp:
         self.setLoadEvent = None
         self.active = active if active is not None else {'devices': {}}
         self.active.setdefault('devices', {})
+        self.active.setdefault('controllers', {})
         self.root.title("Solar 12Vdc UPS Monitor")
         self.load = 0
         self.ui_update_queue = queue.SimpleQueue()
@@ -305,14 +306,52 @@ class SolarMonitorApp:
         return
 
     def _format_device_container_title(self, device_name):
-        nickname = ""
-        active_device = self.active.get('devices', {}).get(device_name, {})
-        if active_device:
-            nickname = str(active_device.get('device_nickname') or '').strip()
+        info = self.info.get(device_name, {})
+        nickname = str(info.get('device_nickname') or '').strip()
         if not nickname:
-            info = self.info.get(device_name, {})
-            nickname = str(info.get('device_nickname') or '').strip()
+            active_device = self.active.get('devices', {}).get(device_name, {})
+            if active_device:
+                nickname = str(active_device.get('device_nickname') or '').strip()
+        controller_uid = str(info.get('controller_uid') or info.get('serial_number') or '').strip()
+        if nickname:
+            return nickname
+        if controller_uid:
+            return controller_uid
         return f"{nickname} {device_name}".strip() if nickname else device_name
+
+    def _controller_profile_key(self, info):
+        if not isinstance(info, dict):
+            return ''
+        model = str(info.get('model') or '').strip()
+        controller_uid = str(info.get('controller_uid') or info.get('serial_number') or '').strip()
+        if model and controller_uid:
+            return f"{model}::{controller_uid}"
+        return controller_uid
+
+    def _apply_controller_profile(self, device_name):
+        info = self.info.get(device_name, {})
+        key = self._controller_profile_key(info)
+        if not key:
+            return
+        controller_profile = self.active.setdefault('controllers', {}).get(key, {})
+        nickname = str(controller_profile.get('device_nickname') or '').strip()
+        if not nickname:
+            return
+        info['device_nickname'] = nickname
+        self.active.setdefault('devices', {}).setdefault(device_name, {}).update({'device_nickname': nickname})
+
+    def _set_device_nickname(self, device_name, nickname):
+        nickname = str(nickname or '').strip()
+        self.active.setdefault('devices', {}).setdefault(device_name, {})['device_nickname'] = nickname
+        info = self.info.setdefault(device_name, {})
+        info['device_nickname'] = nickname
+        key = self._controller_profile_key(info)
+        if key:
+            controllers = self.active.setdefault('controllers', {})
+            profile = controllers.setdefault(key, {})
+            profile['device_nickname'] = nickname
+            profile['model'] = str(info.get('model') or '').strip()
+            profile['controller_uid'] = str(info.get('controller_uid') or info.get('serial_number') or '').strip()
 
     def _refresh_device_container_title(self, device_name):
         devinfo = self.device_notebooks.get(device_name)
@@ -349,7 +388,11 @@ class SolarMonitorApp:
 
         close_button = None
 
-        info_keys = ['device_nickname', 'device_name', 'model', 'load_status', 'charging_status']
+        info_keys = [
+            'device_nickname', 'device_name', 'model',
+            'software_version', 'hardware_version', 'serial_number', 'controller_uid', 'transport_name',
+            'load_status', 'charging_status'
+        ]
         info = self.info.setdefault(device_name, {k: '' for k in info_keys})
         xreport(device_name, 'device_notebook', f"Creating tabs for device: {device_name} with info: {info}", yellow=True)
 
@@ -385,6 +428,7 @@ class SolarMonitorApp:
                 active=self.active['devices'][device_name],
                 info=info,
                 title_callback=lambda: self._refresh_device_container_title(device_name),
+                nickname_callback=lambda nickname: self._set_device_nickname(device_name, nickname),
                 close_callback=lambda: self.close_device_notebook(device_name),
             )
 
@@ -550,7 +594,11 @@ class SolarMonitorApp:
                 logging.info("GUI:on_data_received dropping data before notebook ready device=%s keys=%s", device_name, list(data.keys()))
             return
 
-        info_keys = ['device_nickname', 'device_name', 'model', 'load_status', 'charging_status']
+        info_keys = [
+            'device_nickname', 'device_name', 'model',
+            'software_version', 'hardware_version', 'serial_number', 'controller_uid', 'transport_name',
+            'load_status', 'charging_status'
+        ]
         if device_name not in self.info:
             #self.info[device_name] = { 'device_nickname': '', 'device_name': '', 'model': '', 'load_status': 'off', 'charging_status': 'deactivated', }
             self.info[device_name] = { k:'' for k in info_keys }
@@ -560,6 +608,7 @@ class SolarMonitorApp:
                 #logging.info(f"on_data_received: updating info {key} {data[key][1]}")
                 self.info[device_name][key] = data[key][1].strip() if isinstance(data[key][1], str) else data[key][1]
             #xreport(device_name, 'on_data_received', f"info updated: {self.info[device_name]}", yellow=True)
+        self._apply_controller_profile(device_name)
         self._refresh_device_container_title(device_name)
 
         devinfo = self.ensure_device_notebook(device_name)

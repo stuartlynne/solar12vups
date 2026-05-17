@@ -28,6 +28,30 @@ from lib.log import setup_logger, xreport
 logger = logging.getLogger(__name__)
 
 TRACE_BTTH = False
+
+
+def _parse_version_bytes(blob):
+    if len(blob) < 4:
+        return ""
+    return f"V{blob[1]:02d}.{blob[2]:02d}.{blob[3]:02d}"
+
+
+def _parse_serial_bytes(blob):
+    if len(blob) < 4:
+        return ""
+    return blob.hex().upper()
+
+
+def _default_controller_name(model, serial_number, fallback=""):
+    model = (model or "").strip()
+    serial_number = (serial_number or "").strip()
+    if model and serial_number:
+        return f"{model} - {serial_number}"
+    if model:
+        return model
+    if serial_number:
+        return serial_number
+    return fallback
 EMIT_LIVE_DATA_TO_GUI = True
 
 
@@ -403,12 +427,6 @@ class BtThBleakClient(BleakClientEx):
             #    if self.nicknames is None: return None
             #    return next((name for m, name in self.nicknames if m == name), None)
 
-            device_nickname = get_nickname(self.device_name)
-            data['device_nickname'] = (0, device_nickname, False)
-            self.device_nickname = device_nickname
-            #logging.info(f"parse_device_info: device_nickname: {data['device_nickname']}")
-
-
             data['max_voltage_rated_current'] = (0x0a, bytes_to_int(bs, 3, 2), False)
             data['discharging_current_product_type'] = (0x0b, bytes_to_int(bs, 5, 2), False)
             #logging.info(f"model bs[7:23]: {bs[7:23]}")
@@ -417,13 +435,28 @@ class BtThBleakClient(BleakClientEx):
             self.model = model
             #logging.info(f"parse_device_info: model: {self.model}")
 
-            #data['software_version'] = (0x14, (bs[24:27]).decode('utf-8').strip(), False)
-            #data['hardware_version'] = (0x16, (bs[28:31]).decode('utf-8').strip(), False)
-            #data['serial_number'] = (0x18, (bs[28:31]).decode('utf-8').strip(), False)
-            data['device_id_raw'] = (0x1a, bytes_to_int(bs, 32, 2), False)
-            data['device_id_low'] = (0x1a, bytes_to_int(bs, 32, 2)&0xff, False)
-            data['device_id_high'] = (0x1a, bytes_to_int(bs, 32, 2)>>8, False)
-            data['device_id'] = (0x1a, bytes_to_int(bs, 32, 2)&0xff, False)
+            software_version = _parse_version_bytes(bs[23:27])
+            hardware_version = _parse_version_bytes(bs[27:31])
+            serial_number = _parse_serial_bytes(bs[31:35])
+            data['software_version'] = (0x14, software_version, False)
+            data['hardware_version'] = (0x16, hardware_version, False)
+            data['serial_number'] = (0x18, serial_number, False)
+            data['controller_uid'] = (0x18, serial_number, False)
+            data['transport_name'] = (0, self.device_name, False)
+            device_nickname = get_nickname(self.device_name)
+            if not device_nickname:
+                device_nickname = _default_controller_name(model, serial_number, fallback=self.device_name)
+            data['device_nickname'] = (0, device_nickname, False)
+            self.device_nickname = device_nickname
+            logger.info(
+                "CONTROLLER_ID transport=%s model=%s serial=%s sw=%s hw=%s nickname=%s",
+                self.device_name,
+                model,
+                serial_number,
+                software_version,
+                hardware_version,
+                device_nickname,
+            )
             #logging.info(f"parse_device_info: {data}")
             #self.data.update(data)
             self.queueData(data)

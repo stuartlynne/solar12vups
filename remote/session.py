@@ -25,6 +25,31 @@ from lib.log import xreport
 logger = logging.getLogger(__name__)
 
 ENABLE_REMOTE_BATTERY_INFO = False
+REMOTE_IDENTITY_REFRESH_INTERVAL = 30
+
+
+def _parse_version_bytes(blob):
+    if len(blob) < 4:
+        return ""
+    return f"V{blob[1]:02d}.{blob[2]:02d}.{blob[3]:02d}"
+
+
+def _parse_serial_bytes(blob):
+    if len(blob) < 4:
+        return ""
+    return blob.hex().upper()
+
+
+def _default_controller_name(model, serial_number, fallback=""):
+    model = (model or "").strip()
+    serial_number = (serial_number or "").strip()
+    if model and serial_number:
+        return f"{model} - {serial_number}"
+    if model:
+        return model
+    if serial_number:
+        return serial_number
+    return fallback
 
 
 class RemoteBtThSession:
@@ -94,6 +119,13 @@ class RemoteBtThSession:
             status_text=(0, message, False),
             status_level=(0, level, False),
         )
+
+    def force_identity_refresh(self):
+        self.registers_first = True
+        self.registers_index = None
+        self.register_reads_reset = 0
+        self.model = None
+        self.device_nickname = None
 
     def describe_error(self, exc):
         if isinstance(exc, TimeoutError) or isinstance(exc, asyncio.TimeoutError):
@@ -188,7 +220,12 @@ class RemoteBtThSession:
         old_index = self.registers_index
         self.registers_index = 0 if self.registers_index is None else self.registers_index + 1
 
-        if self.registers_first or self.model is None or self.device_nickname is None:
+        if (
+            self.registers_first
+            or self.model is None
+            or self.device_nickname is None
+            or (self.register_reads_reset > 0 and self.register_reads_reset % REMOTE_IDENTITY_REFRESH_INTERVAL == 0)
+        ):
             if self.registers_index >= len(self.registers):
                 self.registers_index = 0
                 self.registers_first = False
@@ -258,16 +295,31 @@ class RemoteBtThSession:
         data = {}
         data['function'] = (0, FUNCTION.get(bytes_to_int(bs, 1, 1)), False)
         data['device_name'] = (0, self.device_name, False)
-        data['device_nickname'] = (0, self.device_name, False)
         data['max_voltage_rated_current'] = (0x0a, bytes_to_int(bs, 3, 2), False)
         data['discharging_current_product_type'] = (0x0b, bytes_to_int(bs, 5, 2), False)
         model = (bs[7:23]).decode('utf-8').strip()
         data['model'] = (0x0c, model, False)
         self.model = model
-        data['device_id_raw'] = (0x1a, bytes_to_int(bs, 32, 2), False)
-        data['device_id_low'] = (0x1a, bytes_to_int(bs, 32, 2) & 0xff, False)
-        data['device_id_high'] = (0x1a, bytes_to_int(bs, 32, 2) >> 8, False)
-        data['device_id'] = (0x1a, bytes_to_int(bs, 32, 2) & 0xff, False)
+        software_version = _parse_version_bytes(bs[23:27])
+        hardware_version = _parse_version_bytes(bs[27:31])
+        serial_number = _parse_serial_bytes(bs[31:35])
+        data['software_version'] = (0x14, software_version, False)
+        data['hardware_version'] = (0x16, hardware_version, False)
+        data['serial_number'] = (0x18, serial_number, False)
+        data['controller_uid'] = (0x18, serial_number, False)
+        data['transport_name'] = (0, self.device_name, False)
+        device_nickname = _default_controller_name(model, serial_number, fallback=self.device_name)
+        data['device_nickname'] = (0, device_nickname, False)
+        self.device_nickname = device_nickname
+        logger.info(
+            "CONTROLLER_ID transport=%s model=%s serial=%s sw=%s hw=%s nickname=%s",
+            self.device_name,
+            model,
+            serial_number,
+            software_version,
+            hardware_version,
+            device_nickname,
+        )
         self.queueData(data)
 
     def parse_device_address(self, bs):

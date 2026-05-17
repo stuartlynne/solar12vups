@@ -66,7 +66,7 @@ class ActiveJSON:
     def __init__(self, activepath=None, ):
 
         self.activepath = os.path.expanduser(activepath if activepath else "~/solarups_active.json")
-        self.active = {'devices': {}}
+        self.active = {'devices': {}, 'controllers': {}}
 
     def load_active(self):
         if not os.path.exists(self.activepath):
@@ -78,7 +78,9 @@ class ActiveJSON:
             except json.JSONDecodeError as e:
                 logging.exception('load_active: Exception %s' % (e, ))
                 print(traceback.format_exc(), file=sys.stderr)
-                self.active = { 'devices': {} }
+                self.active = {'devices': {}, 'controllers': {}}
+        self.active.setdefault('devices', {})
+        self.active.setdefault('controllers', {})
         return self.active
 
     def save_active(self):
