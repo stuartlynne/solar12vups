@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 TRACE_GUI_UPDATES = False
 USE_SIMPLE_DEVICE_PLACEHOLDER = False
+MAX_HISTORY_SAMPLES = 4000
 
 # Setup logging
 #logging.basicConfig(level=logging.INFO)
@@ -303,6 +304,28 @@ class SolarMonitorApp:
         # fit within the existing geometry instead of growing the root window.
         return
 
+    def _format_device_container_title(self, device_name):
+        nickname = ""
+        active_device = self.active.get('devices', {}).get(device_name, {})
+        if active_device:
+            nickname = str(active_device.get('device_nickname') or '').strip()
+        if not nickname:
+            info = self.info.get(device_name, {})
+            nickname = str(info.get('device_nickname') or '').strip()
+        return f"{nickname} {device_name}".strip() if nickname else device_name
+
+    def _refresh_device_container_title(self, device_name):
+        devinfo = self.device_notebooks.get(device_name)
+        if not devinfo:
+            return
+        container = devinfo.get('container')
+        if container is None:
+            return
+        try:
+            container.configure(text=self._format_device_container_title(device_name))
+        except Exception:
+            pass
+
     def ensure_device_notebook(self, device_name):
         if device_name in self.device_notebooks:
             if TRACE_GUI_UPDATES:
@@ -320,7 +343,7 @@ class SolarMonitorApp:
         xreport(device_name, 'device_notebook', f"Creating notebook for device: {device_name}", blue=True)
         xreport(device_name, 'device_notebook', f"device_notebooks: {self.device_notebooks.keys()}", blue=True)
 
-        container = ttk.LabelFrame(self.devices_frame, text=device_name)
+        container = ttk.LabelFrame(self.devices_frame, text=self._format_device_container_title(device_name))
         notebook = ttk.Notebook(container)
         notebook.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -361,6 +384,7 @@ class SolarMonitorApp:
                 shutdownEvent=self.shutdownEvent,
                 active=self.active['devices'][device_name],
                 info=info,
+                title_callback=lambda: self._refresh_device_container_title(device_name),
                 close_callback=lambda: self.close_device_notebook(device_name),
             )
 
@@ -434,6 +458,7 @@ class SolarMonitorApp:
         info = self.info.setdefault(device_name, {})
         info['status_text'] = status_text
         info['status_level'] = status_level
+        self._refresh_device_container_title(device_name)
         if not USE_SIMPLE_DEVICE_PLACEHOLDER and devinfo.get('powergauge_tab') is not None:
             powergauge_tab = devinfo['powergauge_tab']
             if getattr(powergauge_tab, "_last_data_history", None) is not None:
@@ -535,6 +560,7 @@ class SolarMonitorApp:
                 #logging.info(f"on_data_received: updating info {key} {data[key][1]}")
                 self.info[device_name][key] = data[key][1].strip() if isinstance(data[key][1], str) else data[key][1]
             #xreport(device_name, 'on_data_received', f"info updated: {self.info[device_name]}", yellow=True)
+        self._refresh_device_container_title(device_name)
 
         devinfo = self.ensure_device_notebook(device_name)
         if not devinfo.get('static_ready'):
@@ -587,10 +613,10 @@ class SolarMonitorApp:
                 )
 
         if True:
-            # Limit history to the last 100 samples
-            if len(data_history['time']) > 100:
+            # Keep enough samples for longer history windows such as 60m/120m.
+            if len(data_history['time']) > MAX_HISTORY_SAMPLES:
                 for key in data_history:
-                    data_history[key] = data_history[key][-100:]
+                    data_history[key] = data_history[key][-MAX_HISTORY_SAMPLES:]
 
         # Once real telemetry is flowing, clear any transient connection or
         # transport status so it does not overdraw the live gauge text.

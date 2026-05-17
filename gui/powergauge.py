@@ -135,12 +135,13 @@ if False:
 class PowerGaugeTab:
     def __init__(self, root=None, device_name=None, tab_control=None, text="Power Flow", figure=None, aevents=None, 
                  controlQueues=None, shutdownEvent=None, setLoadEvent=None, active=None, info=None, 
-                 close_callback=None):
+                 title_callback=None, close_callback=None):
         self.root = root
         xreport(device_name, 'PowerGaugeTab', f"Initializing PowerGaugeTab {text} root: {self.root}", green=True, )
         self.tab_control = tab_control
         self.device_name = device_name
         self.close_callback = close_callback
+        self.title_callback = title_callback
         self.text = text
         self.aevents = aevents
         #self.setLoadEvent = setLoadEvent
@@ -772,6 +773,11 @@ class PowerGaugeTab:
                         return
                     self.active['device_nickname'] = new_nickname
                     xreport(self.device_name, 'PowerGauge', f"Nickname set to {self.active['device_nickname']}", green=True, )
+                    if self.title_callback is not None:
+                        try:
+                            self.title_callback()
+                        except Exception:
+                            pass
                     if self._last_data_history is not None:
                         self.update_gauges(self._last_data_history)
                     else:
