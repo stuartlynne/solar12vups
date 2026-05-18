@@ -357,6 +357,12 @@ class RemoteBtThSession:
         temp = bytes_to_int_offset(bs, 0x103, 2)
         data['battery_temperature'] = (0, parse_temperature(temp & 0xff, temp_unit), False)
         data['controller_temperature'] = (0, parse_temperature(temp >> 8, temp_unit), False)
+        logging.info(
+            "CONTROLLER_TEMP transport=%s battery_f=%s controller_f=%s",
+            self.bridge_name,
+            data['battery_temperature'][1],
+            data['controller_temperature'][1],
+        )
         self.queueData(data)
 
     def parse_load_state(self, bs):

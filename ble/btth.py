@@ -515,6 +515,12 @@ class BtThBleakClient(BleakClientEx):
         temp = bytes_to_int_offset(bs, 0x103, 2)
         data['battery_temperature'] = (0, parse_temperature(temp&0xff, temp_unit), False)  # 0x103 - low byte
         data['controller_temperature'] = (0, parse_temperature(temp>>8, temp_unit), False) # 0x103 - high byte
+        logging.info(
+            "CONTROLLER_TEMP transport=%s battery_f=%s controller_f=%s",
+            getattr(self, "name", ""),
+            data['battery_temperature'][1],
+            data['controller_temperature'][1],
+        )
 
         #self.data.update(data)
         self.queueData(data)
@@ -532,8 +538,6 @@ class BtThBleakClient(BleakClientEx):
             return bytes_to_int(bytes, offset, length, scale=scale)
 
         data = {}
-        temp_unit = 'F'
-
         registers = [
             ('light_and_charging_state',    0x120, 2, None),
             ('controller_fault_warnings_121',0x121, 2, None),
@@ -543,9 +547,6 @@ class BtThBleakClient(BleakClientEx):
             data[name] = (f"{addr:04x}", bytes_to_int_offset(bs, addr, length, scale=scale), False, )
 
         data['function'] = (0, FUNCTION.get(bytes_to_int(bs, 1, 1)), False, )
-        temp = bytes_to_int_offset(bs, 0x103, 2)
-        data['battery_temperature'] = (0, parse_temperature(temp&0xff, temp_unit), False)  # 0x103 - low byte
-        data['controller_temperature'] = (0, parse_temperature(temp>>8, temp_unit), False) # 0x103 - high byte
 
         data['Light On/Off write only'] = (0, None, False, )
 

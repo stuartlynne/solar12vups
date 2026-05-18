@@ -76,6 +76,15 @@ class Gaugetype(Enum):
     Load = 2
 
 
+def temperature_status_from_f(temp_f):
+    temp_c = (temp_f - 32.0) * 5.0 / 9.0
+    if temp_c < 0.0 or temp_c >= 50.0:
+        return temp_c, 'danger', 'darkred'
+    if temp_c < 5.0 or temp_c >= 40.0:
+        return temp_c, 'warning', '#c46f00'
+    return temp_c, 'safe', 'darkgreen'
+
+
 FAULT_CODE_TABLE = [
     (0x0001, "E01", "Battery over-discharged"),
     (0x0002, "E02", "Battery over-voltage"),
@@ -492,6 +501,12 @@ class PowerGaugeTab:
             )))
             self._track_static_artist(self.ax.text(x + w / 2, y + h*.5, button['arrow'], ha='center', va='center', fontsize=6, weight='bold'))
 
+        thermometer_label = self._track_static_artist(self.ax.text(
+            5.62, 0.98, "Ctl",
+            ha='center', va='center', fontsize=15, color='gray', fontfamily='Noto Sans Symbols2'
+        ))
+        self.tooltip.add_tip_artist(thermometer_label, "Internal Wanderer controller temperature; useful as a proxy, not ambient box air temperature")
+
         self.draw_block_static(block0_x, zero_y, gaugeType=Gaugetype.PVPS)
         self.draw_block_static(block1_x, zero_y, gaugeType=Gaugetype.Battery)
         self.draw_block_static(block2_x, zero_y, gaugeType=Gaugetype.Load)
@@ -656,6 +671,7 @@ class PowerGaugeTab:
             color='#444444',
         ))
         self._placeholder_time_artist = time_artist
+        self.draw_temperature_display(self._last_data_history or {})
         self.drawanim.reset('placeholder-status-update')
         self._drain_draw(max_steps=128)
 
@@ -883,6 +899,42 @@ class PowerGaugeTab:
             return data_history[key][-1]
         except Exception:
                 return 0
+
+    def get_controller_temp_f(self, data_history):
+        try:
+            value = data_history.get('controller_temperature', [])[-1]
+            return float(value)
+        except Exception:
+            return None
+
+    def draw_temperature_display(self, data_history):
+        temp_f = self.get_controller_temp_f(data_history)
+        logging.info("PowerGauge:temperature device=%s temp_f=%r", self.device_name, temp_f)
+        if temp_f is None:
+            self._replace_dynamic_text_artist(
+                '_temperature_artist',
+                5.62, 0.77,
+                "",
+                ha='center', va='center', fontsize=8, weight='bold'
+            )
+            return
+
+        temp_c, level, color = temperature_status_from_f(temp_f)
+        label = f"{temp_c:.0f}C\n{temp_f:.0f}F"
+        logging.info("PowerGauge:temperature_label device=%s label=%s", self.device_name, label)
+        artist = self._replace_dynamic_text_artist(
+            '_temperature_artist',
+            5.62, 0.77,
+            label,
+            ha='center', va='center', fontsize=8, weight='bold', color=color
+        )
+        self.tooltip.add_tip_artist(
+            artist,
+            f"Controller temperature: {temp_c:.1f}C / {temp_f:.1f}F\n"
+            "Internal Wanderer controller temperature.\n"
+            "Useful as a proxy only; not ambient box air temperature.\n"
+            "Safe: 5C-39C\nWarning: 0C-4C or 40C-49C\nDanger: <0C or >=50C"
+        )
 
     def get_vcw(self, key, data_history):
         vcw = [data_history[f"{key}_{field}"][-1] for field in ("voltage", "current", )]
@@ -1222,6 +1274,7 @@ class PowerGaugeTab:
         # Last time string
         self.lastTimeText = self._track_dynamic_artist(self.ax.text(3.70, 2.078, f"{date_str}", ha='left', va='bottom', fontsize=10, weight='bold'))
         self.tooltip.add_tip_artist(self.lastTimeText, "Last update time")
+        self.draw_temperature_display(data_history)
 
         battery_capacity = self.active.get('battery_capacity', 8)
         batteries = self.active.get('batteries', 1)

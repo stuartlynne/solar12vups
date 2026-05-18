@@ -74,6 +74,8 @@ class SolarMonitorApp:
         'pv_current': [],
         'load_power': [],
         'pv_power': [],
+        'battery_temperature': [],
+        'controller_temperature': [],
         'battery_percentage': [],
         'load_status': [],
         'controller_fault_codes': [],
