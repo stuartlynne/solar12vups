@@ -6,13 +6,13 @@ WIFI_STATIC_IP ?= 192.168.40.81
 WIFI_NETMASK ?= 255.255.255.0
 WIFI_GATEWAY ?= 192.168.40.1
 WIFI_DNS ?= 192.168.40.1
-SERVER_HOST ?= 192.168.40.16
+SERVER_LIST ?= 192.168.40.40 192.168.40.41 192.168.40.16
 SERVER_PORT ?= 9765
 HEALTH_PORT ?= 8766
-UART_ID ?= 0
+UART_ID ?= 1
 UART_BAUDRATE ?= 9600
-UART_TX_PIN ?= 0
-UART_RX_PIN ?= 1
+UART_TX_PIN ?= 4
+UART_RX_PIN ?= 5
 
 ROOT := ..
 INSTALL := python3 $(ROOT)/tools/install_pico_bridge.py
@@ -52,7 +52,7 @@ deploy:
 		--wifi-netmask $(WIFI_NETMASK) \
 		--wifi-gateway $(WIFI_GATEWAY) \
 		--wifi-dns $(WIFI_DNS) \
-		--server-host $(SERVER_HOST) \
+		--server-list $(SERVER_LIST) \
 		--server-port $(SERVER_PORT) \
 		--health-port $(HEALTH_PORT) \
 		--uart-id $(UART_ID) \
@@ -73,7 +73,7 @@ debug:
 		--wifi-netmask $(WIFI_NETMASK) \
 		--wifi-gateway $(WIFI_GATEWAY) \
 		--wifi-dns $(WIFI_DNS) \
-		--server-host $(SERVER_HOST) \
+		--server-list $(SERVER_LIST) \
 		--server-port $(SERVER_PORT) \
 		--health-port $(HEALTH_PORT) \
 		--uart-id $(UART_ID) \

@@ -145,26 +145,42 @@ def validate_crc(frame):
 
 
 def connect_server():
-    addr = socket.getaddrinfo(CONFIG["server_host"], CONFIG["server_port"])[0][-1]
-    debug("server connect target={}:{} resolved={}".format(CONFIG["server_host"], CONFIG["server_port"], addr))
-    sock = socket.socket()
-    try:
-        sock.connect(addr)
-        hello = {
-            "bridge_name": CONFIG["bridge_name"],
-            "server_host": CONFIG["server_host"],
-            "server_port": CONFIG["server_port"],
-            "uart_baudrate": CONFIG["uart_baudrate"],
-        }
-        write_frame(sock, MSG_HELLO, json.dumps(hello).encode("utf-8"))
-        debug("server hello sent bridge_name={}".format(CONFIG["bridge_name"]), sock)
-        return sock
-    except Exception:
+    server_list = CONFIG.get("server_list")
+    if not server_list:
+        legacy_host = CONFIG.get("server_host")
+        server_list = [legacy_host] if legacy_host else []
+
+    last_exc = None
+    for server_host in server_list:
         try:
-            sock.close()
-        except Exception:
-            pass
-        raise
+            addr = socket.getaddrinfo(server_host, CONFIG["server_port"])[0][-1]
+            debug("server connect target={}:{} resolved={}".format(server_host, CONFIG["server_port"], addr))
+            sock = socket.socket()
+            try:
+                sock.connect(addr)
+                hello = {
+                    "bridge_name": CONFIG["bridge_name"],
+                    "server_host": server_host,
+                    "server_port": CONFIG["server_port"],
+                    "uart_baudrate": CONFIG["uart_baudrate"],
+                }
+                write_frame(sock, MSG_HELLO, json.dumps(hello).encode("utf-8"))
+                debug("server hello sent bridge_name={}".format(CONFIG["bridge_name"]), sock)
+                return sock
+            except Exception:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                raise
+        except Exception as exc:
+            last_exc = exc
+            debug("server connect failed target={}:{} exc={}".format(server_host, CONFIG["server_port"], exc))
+            continue
+
+    if last_exc is not None:
+        raise last_exc
+    raise OSError("no server hosts configured")
 
 
 def health_server():

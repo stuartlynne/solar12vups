@@ -6,6 +6,7 @@
 
 import argparse
 import glob
+import json
 import os
 import subprocess
 import tempfile
@@ -19,7 +20,7 @@ CONFIG_TEMPLATE = """CONFIG = {{
     "wifi_netmask": "{wifi_netmask}",
     "wifi_gateway": "{wifi_gateway}",
     "wifi_dns": "{wifi_dns}",
-    "server_host": "{server_host}",
+    "server_list": {server_list},
     "server_port": {server_port},
     "health_port": {health_port},
     "uart_id": {uart_id},
@@ -90,7 +91,7 @@ def main():
     parser.add_argument("--wifi-netmask", default="255.255.255.0")
     parser.add_argument("--wifi-gateway", default="192.168.1.1")
     parser.add_argument("--wifi-dns", default="192.168.1.1")
-    parser.add_argument("--server-host", required=True)
+    parser.add_argument("--server-list", nargs="+", required=True)
     parser.add_argument("--server-port", type=int, default=9765)
     parser.add_argument("--health-port", type=int, default=8766)
     parser.add_argument("--uart-id", type=int, default=0)
@@ -114,7 +115,7 @@ def main():
         wifi_netmask=args.wifi_netmask,
         wifi_gateway=args.wifi_gateway,
         wifi_dns=args.wifi_dns,
-        server_host=args.server_host,
+        server_list=json.dumps(args.server_list),
         server_port=args.server_port,
         health_port=args.health_port,
         uart_id=args.uart_id,
