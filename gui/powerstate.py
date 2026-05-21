@@ -6,6 +6,8 @@ from enum import Enum
 import tabulate
 
 import logging
+
+TRACE_POWERSTATE = False
 from lib.log import setup_logger, xreport
 logger = logging.getLogger(__name__)
 
@@ -174,17 +176,20 @@ class Load:
                 self.from_pvps_w = self.load_w
                 self.from_batt_w = None
                 #self.from_batt_w = -(from_pvps_w - self.load_w)
-                logging.info(f"Load:set: from_pvps_w={from_pvps_w} > load_w={self.load_w} setting from_pvps_w to load_w AAAA")
+                if TRACE_POWERSTATE:
+                    logging.info(f"Load:set: from_pvps_w={from_pvps_w} > load_w={self.load_w} setting from_pvps_w to load_w AAAA")
             else:
                 # is it split between PVPS and battery?
                 self.from_pvps_w = from_pvps_w
                 self.from_batt_w = -(from_pvps_w - self.load_w)
-                logging.info(f"Load:set: from_pvps_w={from_pvps_w} < load_w={self.load_w} setting from_batt_w to {self.from_batt_w} BBBB")
+                if TRACE_POWERSTATE:
+                    logging.info(f"Load:set: from_pvps_w={from_pvps_w} < load_w={self.load_w} setting from_batt_w to {self.from_batt_w} BBBB")
         # all power coming from battery
         else:
             self.from_pvps_w = None
             self.from_batt_w = self.load_w if self.load_v > 0 else None
-            logging.info(f"Load:set: load_v={load_v} load_a={load_a} from_pvps_w={from_pvps_w} from_batt_w={self.from_batt_w} CCCC")
+            if TRACE_POWERSTATE:
+                logging.info(f"Load:set: load_v={load_v} load_a={load_a} from_pvps_w={from_pvps_w} from_batt_w={self.from_batt_w} CCCC")
 
 
 class Power:
@@ -217,11 +222,12 @@ class Power:
 
     def _set(self, powerState):
         self.powerState = powerState
-        logging.info(f"PowerGauge:_set: {self}")
+        if TRACE_POWERSTATE:
+            logging.info(f"PowerGauge:_set: {self}")
         return powerState
 
     def getPowerState(self, pvps_v=0, pvps_a=0, load_v=0, load_a=0, batt_v=0, info=None):
-        if info:
+        if info and TRACE_POWERSTATE:
             logging.info(f"PowerGauge:getPowerState: {self.name} pvps_v={pvps_v} pvps_a={pvps_a} load_v={load_v} load_a={load_a} batt_v={batt_v} {info} AAAA ")
         #logging.info(f"PowerGauge:getPowerState: {data_history}")
         #load_status = data_history['load_status'][-1]
@@ -319,5 +325,4 @@ if __name__ == "__main__":
     except Exception as e:
         logging.exception(f"Exception in main: {e}")
         traceback.print_exc(file=sys.stdout)
-
 

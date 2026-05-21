@@ -89,6 +89,7 @@ class AEvents:
 
         #logger.info('-------------------------')
         interruptEvent1 = Event()
+        sigint_notified = False
         while not shutdownEvent.is_set():
             shutdown.wait(interruptEvent1, timeout=3)
             interruptEvent1.clear()
@@ -96,11 +97,14 @@ class AEvents:
             logger.debug(f'aevents_timerthread: running sigint {sigintEvent.is_set()} shutdown ({shutdownEvent.is_set()}) ...')
             logger.debug(f"aevents_timerthread: interrupt_events {self.interrupt_events}")
             if sigintEvent.is_set():
-                sigintEvent.clear()
-                for name in self.interrupt_events:
-                    #xreport('AEvents.aevents_timerthread', f'{name} interrupted', yellow=True, )
-                    if name in self.all_events:
-                        self.set(name, status=self.EventStatus.INTERRUPTED)
+                if not sigint_notified:
+                    for name in self.interrupt_events:
+                        # Preserve the shared SIGINT event so outer shutdown loops can see it.
+                        if name in self.all_events:
+                            self.set(name, status=self.EventStatus.INTERRUPTED)
+                    sigint_notified = True
+            else:
+                sigint_notified = False
 
             to_clear = []
             logger.debug('aevents_timerthread: sleeping %s ...' % (self.sleeping, ))
@@ -150,6 +154,22 @@ class AEvents:
         if name in self.all_events:
             return self.all_events[name].is_set()
         return False
+
+    def ensure_event(self, eventName, shutdownFlag=True, interruptFlag=True, taskFlag=False):
+        if eventName in self.all_events:
+            return self.all_events[eventName]
+
+        event = asyncio.Event()
+        event.clear()
+        self.all_events[eventName] = event
+        if shutdownFlag:
+            self.shutdown_events.append(eventName)
+        if interruptFlag:
+            self.interrupt_events.append(eventName)
+        if taskFlag:
+            self.task_events.append(eventName)
+        self.last_event[eventName] = self.EventStatus.NONE
+        return event
 
     # Wait on a named event allowing for termination when:
     #   - the event to be set
@@ -375,4 +395,3 @@ if __name__ == '__main__':
     if main_thread:
         main_thread.join()
     logger.info(f"__main__ shutdown event set, finished")
-

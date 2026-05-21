@@ -9,6 +9,7 @@ import sys
 import os
 import json
 import asyncio
+import concurrent.futures
 import async_timeout
 import signal
 from colored import cprint, fg, bg, attr, set_tty_aware
@@ -33,14 +34,15 @@ from pathlib import Path
 
 import platform
 from functools import partial
-from bleak import BleakScanner
 from enum import Enum, IntEnum
+from types import SimpleNamespace
 
 import traceback
 from lib.lib import bytes2str, uuid_to_name, name_to_uuid
 
 from gui.gui import SolarMonitorApp
 from ble.task import device_task
+from remote.task import remote_server_task, DEFAULT_REMOTE_HOST, DEFAULT_REMOTE_PORT
 
 import logging
 from lib.log import setup_logger, xreport
@@ -51,16 +53,21 @@ if __name__ == '__main__':
 logger = logging.getLogger(__name__)
 logger.info("bleexplorer LOGGER TEST")
 
+DEFAULT_BLE_NAME_PREFIXES = ("BT-TH", "BT-1")
+ENABLE_REMOTE_BRIDGE = True
+
 
 import subprocess
 import re
+from time import sleep
+from app.bleio import start_ble_data_io_process, stop_ble_data_io_process
 
 class ActiveJSON:
 
     def __init__(self, activepath=None, ):
 
         self.activepath = os.path.expanduser(activepath if activepath else "~/solarups_active.json")
-        self.active = {'devices': {}}
+        self.active = {'devices': {}, 'controllers': {}}
 
     def load_active(self):
         if not os.path.exists(self.activepath):
@@ -72,7 +79,9 @@ class ActiveJSON:
             except json.JSONDecodeError as e:
                 logging.exception('load_active: Exception %s' % (e, ))
                 print(traceback.format_exc(), file=sys.stderr)
-                self.active = { 'devices': {} }
+                self.active = {'devices': {}, 'controllers': {}}
+        self.active.setdefault('devices', {})
+        self.active.setdefault('controllers', {})
         return self.active
 
     def save_active(self):
@@ -85,7 +94,7 @@ class ActiveJSON:
             print(traceback.format_exc(), file=sys.stderr)
 
 
-def disconnect_devices_by_name(name_substring: str):
+def disconnect_devices_by_name(name_substring: str, remove=False):
     if platform.system() != 'Linux':
         return
 
@@ -121,6 +130,27 @@ def disconnect_devices_by_name(name_substring: str):
                 text=True
             )
             xreport('solar12vups', 'Disconnect Result', f"{disconnect_result.stdout.strip()}", red=True, )
+            # Give BlueZ and the BT module time to settle before reconnect attempts.
+            for _ in range(10):
+                info_result = subprocess.run(
+                    ['bluetoothctl', 'info', mac],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                info_text = info_result.stdout or ""
+                if "Connected: yes" not in info_text:
+                    break
+                sleep(0.5)
+            if remove:
+                remove_result = subprocess.run(
+                    ['bluetoothctl', 'remove', mac],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                xreport('solar12vups', 'Remove Result', f"{remove_result.stdout.strip()}", red=True, )
+            sleep(1.0)
         if not devices:
             xreport('solar12vups', 'Disconnect Devices', f"No devices found matching '{name_substring}'", red=True, )
     except Exception as e:
@@ -131,12 +161,17 @@ def disconnect_devices_by_name(name_substring: str):
 
 def handle_task_result(task):
     logger.info('handle_task_result: task: %s' % (task, ))
-    name = task.get_name()
+    if hasattr(task, 'get_name'):
+        name = task.get_name()
+    else:
+        name = getattr(task, 'name', None) or repr(task)
     try:
         value = task.result()
         xreport(name, 'Finished', yellow=True)
-    except asyncio.CancelledError as e:
-        logging.exception('handle_task_result: exception: %s' % (e, ))
+    except asyncio.CancelledError:
+        logger.info('handle_task_result: task cancelled: %s', name)
+    except concurrent.futures.CancelledError:
+        logger.info('handle_task_result: future cancelled: %s', name)
     except Exception as e:
         logging.exception('handle_task_result: exception: %s' % (e, ))
         print(traceback.format_exc(), file=sys.stderr)
@@ -157,7 +192,65 @@ def exception_handler(loop, context):
     logging.error(f'Task failed, msg={message}, exception={exception} task={task} future={future}')
 
 
-async def blemaintask(active=None, shutdown=None, aevents=None, controlQueues=None, dataQueue=None, argv=None, ):
+def start_ble_discovery_process(matchlist):
+    discovery_script = os.path.join(os.path.dirname(__file__), '..', 'tools', 'ble_discovery_worker.py')
+    discovery_process = subprocess.Popen(
+        [sys.executable, '-u', discovery_script, *matchlist],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    discovery_queue = queue.Queue()
+
+    def read_stdout():
+        try:
+            for line in iter(discovery_process.stdout.readline, ''):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    discovery_queue.put(json.loads(line))
+                except json.JSONDecodeError:
+                    discovery_queue.put({'error': f'invalid discovery json: {line}'})
+        finally:
+            try:
+                discovery_process.stdout.close()
+            except Exception:
+                pass
+
+    def read_stderr():
+        try:
+            for line in iter(discovery_process.stderr.readline, ''):
+                line = line.strip()
+                if line:
+                    discovery_queue.put({'error': line})
+        finally:
+            try:
+                discovery_process.stderr.close()
+            except Exception:
+                pass
+
+    Thread(target=read_stdout, name='BLEDiscoveryStdout', daemon=True).start()
+    Thread(target=read_stderr, name='BLEDiscoveryStderr', daemon=True).start()
+    return discovery_process, discovery_queue
+
+
+def stop_ble_discovery_process(discovery_process):
+    if discovery_process is None:
+        return
+    try:
+        if discovery_process.poll() is None:
+            discovery_process.terminate()
+            discovery_process.wait(timeout=5)
+    except Exception:
+        try:
+            discovery_process.kill()
+        except Exception:
+            pass
+
+
+async def blemaintask(active=None, shutdown=None, aevents=None, controlQueues=None, dataQueue=None, argv=None, discoveryQueue=None, discoveryProcess=None, ):
 
 
     # get the event loop
@@ -166,7 +259,14 @@ async def blemaintask(active=None, shutdown=None, aevents=None, controlQueues=No
     loop.set_exception_handler(exception_handler)
 
     logger = logging.getLogger()
-    matchlist = [arg.lower().strip() for arg in argv]
+    if argv is None:
+        raw_matchlist = []
+    elif isinstance(argv, str):
+        raw_matchlist = [argv]
+    else:
+        raw_matchlist = list(argv)
+    matchlist = [arg.lower().strip() for arg in raw_matchlist if arg and arg.strip()]
+    logger.info('blemaintask: matchlist=%s raw=%r', matchlist, argv)
     aevents.start()
     logger.info('blemaintask: aevents started')
 
@@ -175,81 +275,57 @@ async def blemaintask(active=None, shutdown=None, aevents=None, controlQueues=No
         raise ValueError("controlQueues and dataQueue must be provided")
 
     xreport('blemaintask', 'Scanning', '%s' % (argv), )
-    #task_stop_events = {}
-    #restart_event = asyncio.Event()
-
-
-    # detection_callback is called by the scanner when it finds a device.
-    # the scanner_control event is used to pause the scanner to allow the bluez
-    # stack to manage the client connection.
     tasks = {}
-    detection_callbacks = 0
-    detection_lasttime = time()
-    scanner_results = []
-    async def detection_callback(dev=None, ad=None, ):
-        #global detection_callbacks
-        #global detection_lasttime
-        nonlocal detection_callbacks, detection_lasttime, tasks, scanner_results
-        detection_callbacks += 1
-        # this gives us a tick to show if the scanner is still running
-
-
-        if False:
-            if (time() - detection_lasttime) > 10:
-                xreport('blemaintask', 'Detection', '%s' % (detection_callbacks, ), )
-                xreport('blemaintask', 'Tasks', '%s' % ([t for t in tasks.keys()]))
-                detection_lasttime = time()
-
-
-        # if the device name is not None and it is not already in the tasks list, then we will check if
-        # it is in the supported devices list and if so, we will create an asyncio task for it.
-        done = {k:v for k, v in tasks.items() if v.done()  }
-        tasks = {k:v for k, v in tasks.items() if not v.done()  }
-        devname = dev.name.strip().lower() if dev.name is not None else None
-        #logger.info('[%-35s] detection_callback devname: %s matchlist: %s' % ('BleakScanner', devname, matchlist ))
-        if devname and any(devname.startswith(prefix) for prefix in matchlist) and devname not in tasks:
-            xreport('blemaintask', 'Found', devname, blue=True, )
-            scanner_results.append((devname, dev))
-            aevents.set('scanner_control')
     try:
-        # BleakScanner will run actively scanning. As it finds matching devices it will call the detection_callback.
-        # This process will continue inside the with statement until the stop_event is set.
-        # The process will wait for the scanner_control event to be set before stopping the scanner.
-        # scanner_control will be set when there are scanner results to process OR when the shutdownFlag has been set.
-        # N.b. The scanner will stop when the with statement block is exited.
         while not aevents.is_shutdown():
-            async with BleakScanner(detection_callback=detection_callback, scanning_mode="active") as scanner:
-                while not aevents.is_shutdown():
-                    await aevents.wait('scanner_control', )
-                    status = aevents.status('scanner_control', )
-                    aevents.clear('scanner_control', )
-                    #xreport('blemaintask', 'Control', 'Status: %s' % (status, ), )
-                    await scanner.stop()
-                    if status == aevents.EventStatus.SHUTDOWN:
-                        #xreport('blemaintask', 'Shutdown', 'Stopping scanner ...', )
-                        break
-                    #if aevents.shutdownFlag:
-                    #    break
-                    for devname, dev in scanner_results:
-                        xreport('blemaintask', devname, f"tasks: {tasks}", blue=True, )
-                        if devname not in tasks:
-                            xreport('blemaintask', devname, f"adding", blue=True, )
-                            controlQueue = Queue()
-                            controlQueues[devname] = controlQueue
-                            tasks[devname] = asyncio.create_task(device_task(dev, active=active,
-                                     aevents=aevents, controlQueue=controlQueue, dataQueue=dataQueue,), name=devname,)
-                            tasks[devname].add_done_callback(handle_task_result)   
-                            xreport('blemaintask', devname, f"tasks: {tasks} added", blue=True, )
-                            #xreport('blemaintask', 'sleep 10', devname, )
-                            await asyncio.sleep(10)  # give the scanner a tick to process
-                    scanner_results = []
-                    #xreport('blemaintask', 'Restarting', 'Waiting for scanner_control ...', blue=True, )
-                    try:
-                        await scanner.start()
-                    except AttributeError as e:
-                        xreport(f"blemaintask: scanner.stop() skipped: {e}", grey=True)
-                    except Exception as e:
-                        logging.exception(f"blemaintask: scanner.stop() exception: {e}")
+            tasks = {k: v for k, v in tasks.items() if not v.done()}
+            scanner_results = {}
+            if discoveryProcess is not None and discoveryProcess.poll() is not None:
+                raise RuntimeError(f"discovery worker exited rc={discoveryProcess.returncode}")
+
+            while discoveryQueue is not None:
+                try:
+                    message = discoveryQueue.get_nowait()
+                except queue.Empty:
+                    break
+
+                if 'error' in message:
+                    xreport('blemaintask', 'Discovery', message['error'], red=True)
+                    continue
+
+                for info in message.get('devices', []):
+                    devname = info['name'].strip().lower()
+                    if devname in tasks or devname in scanner_results:
+                        continue
+                    xreport('blemaintask', 'Found', devname, blue=True, )
+                    scanner_results[devname] = SimpleNamespace(
+                        name=info['name'],
+                        address=info['address'],
+                    )
+
+            if not scanner_results:
+                await asyncio.sleep(1)
+                continue
+
+            for devname, dev in list(scanner_results.items()):
+                xreport('blemaintask', devname, f"tasks: {tasks}", blue=True, )
+                if devname not in tasks:
+                    xreport('blemaintask', devname, f"adding", blue=True, )
+                    controlQueue = Queue()
+                    controlQueues[devname] = controlQueue
+                    tasks[devname] = asyncio.create_task(
+                        device_task(
+                            dev,
+                            active=active,
+                            aevents=aevents,
+                            controlQueue=controlQueue,
+                            dataQueue=dataQueue,
+                        ),
+                        name=devname,
+                    )
+                    tasks[devname].add_done_callback(handle_task_result)
+                    xreport('blemaintask', devname, f"tasks: {tasks} added", blue=True, )
+            await asyncio.sleep(1)
 
 
 
@@ -296,8 +372,6 @@ async def blemaintask(active=None, shutdown=None, aevents=None, controlQueues=No
         logging.exception('blemaintask: exception: %s' % (e, ))
         await asyncio.sleep(2)
     finally:
-        # stop the scanner
-        await aevents.set('scanner_control', aevents.EventStatus.SHUTDOWN)
         await asyncio.sleep(1)
         xreport('blemaintask', 'Shutdown', '...', yello=True, )
 
@@ -305,7 +379,8 @@ async def blemaintask(active=None, shutdown=None, aevents=None, controlQueues=No
 
 
 def blemainthread(name, root=None, app=None, active=None, aevents=None, 
-                  shutdown=None, sigintEvent=None, shutdownEvent=None, controlQueues=None, dataQueue=None, argv=None, ):
+                  shutdown=None, sigintEvent=None, shutdownEvent=None, controlQueues=None, dataQueue=None, argv=None,
+                  enable_remote=True, enable_discovery=True ):
 
     logging.info(f"blemainThread: Starting BLEMainThread ... app: {app}, " )
     logging.info(f"blemainThread: Starting BLEMainThread ... controlQueues: {controlQueues}, " )
@@ -321,12 +396,31 @@ def blemainthread(name, root=None, app=None, active=None, aevents=None,
     logger = logging.getLogger('BLEMainThread')
     xreport('BLEMainThread', 'blemainthread: Starting AsyncTaskManger', '%s' % (name, ), )
     logger.info('blemainthread: Starting AsyncTaskManager')
-    asyncman = AsyncTaskManager()
-    asyncman.start()
+    remote_asyncman = AsyncTaskManager()
+    remote_asyncman.start()
+    device_asyncman = AsyncTaskManager()
+    device_asyncman.start()
+    raw_matchlist = [part.lower().strip() for part in name.split(',') if part.strip()]
+    discoveryProcess = discoveryQueue = None
+    if enable_discovery:
+        discoveryProcess, discoveryQueue = start_ble_discovery_process(raw_matchlist)
     xreport('BLEMainThread', 'blemainthread: Starting AEvents', '%s' % (name, ), )
     logger.info('blemainthread: Starting AEvents')
-    #aevents = AEvents(shutdown, )
-    asyncman.run('blemaintask', blemaintask(active=active, shutdown=shutdown, aevents=aevents, controlQueues=controlQueues, dataQueue=dataQueue, argv=argv, ))
+    aevents.loop = device_asyncman.loop
+    aevents.start()
+    if enable_remote:
+        remote_asyncman.run(
+            'remote_server_task',
+            remote_server_task(
+                active=active,
+                shutdown=shutdown,
+                aevents=aevents,
+                controlQueues=controlQueues,
+                dataQueue=dataQueue,
+                host=DEFAULT_REMOTE_HOST,
+                port=DEFAULT_REMOTE_PORT,
+            ),
+        )
 
     if False and sys.version_info >= (3, 13): 
         try:
@@ -347,30 +441,76 @@ def blemainthread(name, root=None, app=None, active=None, aevents=None,
             print(traceback.format_exc(), file=sys.stderr)
     else:
         logging.info(f"blemainthread: checking ... app: {app}, " )
+        device_tasks = {}
         try:
-            #result = shutdownEvent.wait()
             while not shutdownEvent.is_set() and not sigintEvent.is_set():
-                result = shutdownEvent.wait(timeout=1)
-                xreport('blemainthread', 'shutdowEvent result', f"result: {result}", blue=True, )
-                if not result:
-                    while not dataQueue.empty():
-                        data = dataQueue.get()
-                        #logging.info(f"blemainthread: checking ... app: {app}, " )
-                        #xreport('solar12vups', 'DataQueue', f"Data: {data}")
-                        if app:
-                            app.on_data_received(data[0], data[1])
-                        else:
-                            #xreport('blemainthread', data[0], f"Data: {len(data[1].keys())} {data[1].keys() if data[1] else 'None'}")
-                            try:
-                                xreport('blemainthread', data[0], f"Data: {len(data[1].keys())}")
-                            except:
-                                xreport('blemainthread', data[0], f"Data: {len(data[1])}")
-                        continue
+                for devname, task in list(device_tasks.items()):
+                    if task.done():
+                        handle_task_result(task)
+                        device_tasks.pop(devname, None)
+                        controlQueues.pop(devname, None)
+
+                if enable_discovery and discoveryProcess is None:
+                    discoveryProcess, discoveryQueue = start_ble_discovery_process(raw_matchlist)
+
+                if enable_discovery and discoveryProcess is not None and discoveryProcess.poll() is not None:
+                    stderr_text = ''
+                    try:
+                        stderr_text = discoveryProcess.stderr.read().strip()
+                    except Exception:
+                        pass
+                    xreport('blemainthread', 'Discovery Exit', f"rc={discoveryProcess.returncode} {stderr_text}", red=True)
+                    discoveryProcess = None
+
+                if enable_discovery:
+                    pending_devices = []
+                    while True:
+                        try:
+                            message = discoveryQueue.get_nowait()
+                        except queue.Empty:
+                            break
+
+                        if 'error' in message:
+                            xreport('blemainthread', 'Discovery', message['error'], red=True)
+                            continue
+
+                        for info in message.get('devices', []):
+                            devname = info['name'].strip().lower()
+                            if devname in device_tasks:
+                                continue
+                            xreport('blemaintask', 'Found', devname, blue=True, )
+                            pending_devices.append(info)
+
+                    for info in pending_devices:
+                        devname = info['name'].strip().lower()
+                        if devname in device_tasks:
+                            continue
+                        controlQueue = Queue()
+                        controlQueues[devname] = controlQueue
+                        device = SimpleNamespace(name=info['name'], address=info['address'])
+                        xreport('blemaintask', devname, "adding", blue=True, )
+                        task = device_asyncman.run(
+                            devname,
+                            device_task(
+                                device,
+                                active=active,
+                                aevents=aevents,
+                                controlQueue=controlQueue,
+                                dataQueue=dataQueue,
+                            ),
+                        )
+                        task.name = devname
+                        task.add_done_callback(handle_task_result)
+                        device_tasks[devname] = task
+
+                shutdownEvent.wait(timeout=1)
         except Exception as e:
             logging.exception('__main__: exception: %s' % (e, ))
 
     xreport('BLEMainThread', 'blemainthread: Stopping AsyncTaskManager', '%s' % (name, ), )
-    asyncman.shutdown()
+    remote_asyncman.shutdown()
+    device_asyncman.shutdown()
+    stop_ble_discovery_process(discoveryProcess)
     shutdown.set('blemaintask', )
 
     if root:
@@ -409,7 +549,7 @@ def join(target_thread=None, count=0):
 
 
 
-def SolarMain():
+def SolarMain(enable_ble=True, enable_bleio=True, ble_thread_only=False):
 
     #print('Solar12VUPS SolarMain starting...', file=sys.stderr)
     activeJSON = ActiveJSON(activepath='~/solarups_active.json', )
@@ -430,105 +570,124 @@ def SolarMain():
     #    sleep(2)
     #logger.info('argv: %s' % (sys.argv, ))
 
-    name = 'BT-TH' 
+    names = list(DEFAULT_BLE_NAME_PREFIXES)
 
     #controlQueue = Queue()
     controlQueues = {}
-    dataQueue = Queue()
+    bleDataProcess = bleDataInputQueue = bleDataGuiQueue = bleDataStopEvent = None
+    if enable_bleio:
+        bleDataProcess, bleDataInputQueue, bleDataGuiQueue, bleDataStopEvent = start_ble_data_io_process()
 
 
     shutdown = Shutdown()
     events = shutdown.events()
     sigintEvent, shutdownEvent = events[0], events[1]
     #shutdown.add_queue(controlQueue)
-    shutdown.add_queue(dataQueue)
     app = None
     root = None
 
-    disconnect_devices_by_name(name)
+    def _find_data_file(name: str) -> str:
+        candidates = []
+        try:
+            candidates.append(Path(os.getcwd()) / name)
+        except Exception:
+            pass
+        candidates.extend([
+            Path(__file__).resolve().parents[1] / name,
+            Path(sys.prefix) / 'share' / 'solar12vups' / name,
+            Path('/usr/local/share/solar12vups') / name,
+            Path('/usr/share/solar12vups') / name,
+        ])
+        for p in candidates:
+            try:
+                if p.exists():
+                    return str(p)
+            except Exception:
+                continue
+        return name
 
-    aevents = AEvents(shutdown, )
-    if True:
-        root = tk.Tk()
-        if sys.platform == "win32":
-            root.iconbitmap("favicon.ico")
-        else:
-            def _find_data_file(name: str) -> str:
-                candidates = []
-                try:
-                    candidates.append(Path(os.getcwd()) / name)
-                except Exception:
-                    pass
-                candidates.extend([
-                    Path(__file__).resolve().parents[1] / name,
-                    Path(sys.prefix) / 'share' / 'solar12vups' / name,
-                    Path('/usr/local/share/solar12vups') / name,
-                    Path('/usr/share/solar12vups') / name,
-                ])
-                for p in candidates:
+    if enable_ble:
+        for name in names:
+            disconnect_devices_by_name(name)
+
+    blemain_thread = None
+    try:
+        aevents = AEvents(shutdown, )
+        if True:
+            root = tk.Tk()
+            if sys.platform == "win32":
+                root.iconbitmap(_find_data_file("favicon.ico"))
+            else:
+                icon = None
+                for icon_name in ('favicon-strict.png', 'favicon.png'):
                     try:
-                        if p.exists():
-                            return str(p)
+                        icon = tk.PhotoImage(file=_find_data_file(icon_name))
+                        break
                     except Exception:
-                        continue
-                return name
+                        icon = None
+                if icon is not None:
+                    root.iconphoto(True, icon)
 
-            icon = None
-            for icon_name in ('favicon-strict.png', 'favicon.png'):
-                try:
-                    icon_path = _find_data_file(icon_name)
-                    icon = tk.PhotoImage(file=icon_path)
+            xreport('solar12vups', 'Tkinter', f"Starting SolarMonitorApp ... root: {root}", grey=True, )
+            app = SolarMonitorApp(
+                root=root,
+                client=None,
+                controlQueues=controlQueues,
+                aevents=aevents,
+                active=active,
+                shutdownEvent=shutdownEvent,
+                incoming_queue=bleDataGuiQueue,
+            )
+
+        if enable_ble or ble_thread_only:
+            xreport('solar12vups', 'Starting BLEMainThread', '%s' % (names, ), yellow=True, )
+            blemain_thread = Thread(target=blemainthread, 
+                                    kwargs={
+                                        'root': root,
+                                        'aevents': aevents,
+                                        'active': active,
+                                        'app': app,
+                                        'name': ",".join(names),
+                                        'shutdown': shutdown,
+                                        'sigintEvent': events[0],
+                                        'shutdownEvent': events[1],
+                                        'controlQueues': controlQueues,
+                                        'dataQueue': bleDataInputQueue,
+                                        'argv': names,
+                                        'enable_remote': enable_ble and ENABLE_REMOTE_BRIDGE,
+                                        'enable_discovery': enable_ble,
+                                    },
+                                    name='BLEMainThread', daemon=True)
+            blemain_thread.start()
+        else:
+            xreport('solar12vups', 'BLE Disabled', 'Starting Tkinter without BLE/discovery threads', yellow=True)
+
+        if root and app:
+            xreport('solar12vups', 'Starting SolarMonitorApp', '%s' % (names, ), yellow=True, )
+            root.mainloop()
+            xreport('solar12vups', 'SolarMonitorApp', 'mainloop() exited ...', yellow=True, )
+            shutdown.set('blemaintask', )
+        else:
+            logger.info('asyncio_stop_event set, waiting for stop_event ...')
+            shutdownEvent.wait()
+
+        activeJSON.save_active()
+
+        if blemain_thread is not None:
+            xreport('solar12vups', 'Waiting for BLEMainThread to finish ...', red=True, )
+            for count in range(10):
+                if not blemain_thread.is_alive():
                     break
-                except Exception:
-                    icon = None
-            if icon is not None:
-                root.iconphoto(True, icon)
-        #    root.title("Solar 12V UPS Monitor")
+                xreport('solar12vups', count, 'BLEMainThread is still alive, waiting ...', red=True, )
+                blemain_thread.join(timeout=1)
 
-        xreport('solar12vups', 'Tkinter', f"Starting SolarMonitorApp ... root: {root}", grey=True, )
-        app = SolarMonitorApp(root=root, client=None, controlQueues=controlQueues, aevents=aevents, active=active, shutdownEvent=shutdownEvent)
-
-    xreport('solar12vups', 'Starting BLEMainThread', '%s' % (name, ), yellow=True, )
-    blemain_thread = Thread(target=blemainthread, 
-                            kwargs={
-                                'root': root,
-                                'aevents': aevents,
-                                'active': active,
-                                'app': app,
-                                'name': name,
-                                'shutdown': shutdown,
-                                'sigintEvent': events[0],
-                                'shutdownEvent': events[1],
-                                'controlQueues': controlQueues,
-                                'dataQueue': dataQueue,
-                                #'argv': sys.argv[1:]
-                                'argv': name,
-                            },
-                            name='BLEMainThread', daemon=True)
-    blemain_thread.start()
-
-
-    if root and app:
-        xreport('solar12vups', 'Starting SolarMonitorApp', '%s' % (name, ), yellow=True, )
-        root.mainloop()
-        xreport('solar12vups', 'SolarMonitorApp', 'mainloop() exited ...', yellow=True, )
-        shutdown.set('blemaintask', )
-    else:
-        logger.info('asyncio_stop_event set, waiting for stop_event ...')
-        shutdownEvent.wait()
-
-    activeJSON.save_active()
-
-    #asyncio_stop_event.wait()
-    xreport('solar12vups', 'Waiting for BLEMainThread to finish ...', red=True, )
-    for count in range(10):
-        if not blemain_thread.is_alive():
-            break
-        xreport('solar12vups', count, 'BLEMainThread is still alive, waiting ...', red=True, )
-        blemain_thread.join(timeout=1)
-
-
-    xreport('solar12vups', 'BLEMainThread finished ...', red=True, )
+            xreport('solar12vups', 'BLEMainThread finished ...', red=True, )
+    finally:
+        if bleDataProcess is not None:
+            stop_ble_data_io_process(bleDataProcess, bleDataInputQueue, bleDataStopEvent)
+        if enable_ble:
+            for name in names:
+                disconnect_devices_by_name(name, remove=True)
 
 if __name__ == "__main__":
     SolarMain()

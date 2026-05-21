@@ -19,7 +19,7 @@ class ToolTipManager:
         #self.label = tk.Label(self.root, text="", bg="yellow", relief="solid", bd=1, font=("Arial", 8))
 
         self.mpl_canvas.mpl_connect("motion_notify_event", self._on_motion)
-        logging.info('ToolTipManager initialized with canvas_widget: %s, mpl_canvas: %s, ax: %s',)
+        pass
 
     def add_tip_box(self, bounds, text, fixedFont=False, name=None):
         """
@@ -89,4 +89,3 @@ class ToolTipManager:
             self.tooltip_window.destroy()
             self.tooltip_window = None
             self.current_text = None
-
