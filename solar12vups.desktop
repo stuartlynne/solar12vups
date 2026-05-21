@@ -1,0 +1,17 @@
+[Desktop Entry]
+# Note: This file is a reference template. The installer writes
+# a finalized copy to ~/Desktop/solar12vups.desktop with correct paths.
+Name=Solar12VUPS
+Type=Application
+Comment=Solar-powered UPS monitor (BLE + Tkinter GUI)
+Terminal=false
+# If running from source (without install), you may use these:
+# Exec=python3 solar_runner.py --stderr
+# Icon=favicon.png
+# When installed via `pip install .`, the generated file uses absolute
+# Exec and Icon paths based on the installation prefix.
+Exec=solar12vups
+Icon=favicon.png
+Categories=Utility;System;
+Keywords=Solar;UPS;Battery;BLE;Monitoring;
+StartupNotify=true
