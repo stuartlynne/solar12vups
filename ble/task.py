@@ -41,7 +41,7 @@ SupportedDevices = {
 
 statistics = {}
 startup_lock = asyncio.Lock()
-CONNECT_TIMEOUT_SECONDS = 6.0
+CONNECT_TIMEOUT_SECONDS = 20.0
 FIRST_DATA_TIMEOUT_SECONDS = 6.0
 
 
@@ -322,25 +322,29 @@ async def device_task(device, active=None, aevents=None, controlQueue=None, data
                         disconnect_event=client_task_event,
                     ),
                 )
+                xreport(device_name, 'device_task', 'Waiting for startup lock', blue=True)
                 async with startup_lock:
-                    xreport(device_name, 'device_task', 'Connecting', blue=True)
+                    xreport(device_name, 'device_task', f'Connecting timeout={CONNECT_TIMEOUT_SECONDS:.0f}s', blue=True)
                     emit_status('Connecting to BLE device.', level='info')
+                    connect_started = time()
                     await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT_SECONDS)
+                    xreport(device_name, 'device_task', f'Connected in {time() - connect_started:.1f}s', blue=True)
                     xreport(device_name, 'Start',  blue=True, )
                     await client.start()
                     try:
                         dataQueue.put((device_name, {'__ui_event__': (None, 'device_ready', False)}))
                     except Exception:
                         pass
-                    emit_status('BLE connected. Waiting for first telemetry.', level='info')
-                    try:
-                        await asyncio.wait_for(client.first_data_event.wait(), timeout=FIRST_DATA_TIMEOUT_SECONDS)
-                        aevents.clear(client_task_event)
-                        emit_status('BLE connected. Telemetry active.', level='ok')
-                    except asyncio.TimeoutError:
-                        xreport(device_name, 'device_task', 'No first data, restarting client', red=True)
-                        emit_status('BLE connected, but no telemetry arrived. Retrying.', level='error')
-                        restart_client = True
+
+                emit_status('BLE connected. Waiting for first telemetry.', level='info')
+                try:
+                    await asyncio.wait_for(client.first_data_event.wait(), timeout=FIRST_DATA_TIMEOUT_SECONDS)
+                    aevents.clear(client_task_event)
+                    emit_status('BLE connected. Telemetry active.', level='ok')
+                except asyncio.TimeoutError:
+                    xreport(device_name, 'device_task', 'No first data, restarting client', red=True)
+                    emit_status('BLE connected, but no telemetry arrived. Retrying.', level='error')
+                    restart_client = True
                 try:
                     if False:
                         result = await device_explore(client, device, aevents, )

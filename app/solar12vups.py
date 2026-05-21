@@ -449,7 +449,7 @@ def blemainthread(name, root=None, app=None, active=None, aevents=None,
                         device_tasks.pop(devname, None)
                         controlQueues.pop(devname, None)
 
-                if enable_discovery and not device_tasks and discoveryProcess is None:
+                if enable_discovery and discoveryProcess is None:
                     discoveryProcess, discoveryQueue = start_ble_discovery_process(raw_matchlist)
 
                 if enable_discovery and discoveryProcess is not None and discoveryProcess.poll() is not None:
@@ -479,11 +479,6 @@ def blemainthread(name, root=None, app=None, active=None, aevents=None,
                                 continue
                             xreport('blemaintask', 'Found', devname, blue=True, )
                             pending_devices.append(info)
-
-                    if pending_devices and discoveryProcess is not None:
-                        stop_ble_discovery_process(discoveryProcess)
-                        discoveryProcess = None
-                        sleep(1)
 
                     for info in pending_devices:
                         devname = info['name'].strip().lower()

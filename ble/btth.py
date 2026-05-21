@@ -300,7 +300,7 @@ class BtThBleakClient(BleakClientEx):
                 match control[1]:
                     case 'set':
                         device_name, op, addr, description, value = control
-                        await self.check_events_queues(control)
+                        await self.set_register(addr, value)
                         pass
                     case 'toggle_load':
                         try:
@@ -521,6 +521,13 @@ class BtThBleakClient(BleakClientEx):
             data['battery_temperature'][1],
             data['controller_temperature'][1],
         )
+        logging.info(
+            "CHG_SUMMARY transport=%s batt=%0.1fV %0.2fA load=%0.1fV %0.2fA %0.1fW pv=%0.1fV %0.2fA %0.1fW",
+            getattr(self, "name", ""),
+            data['battery_voltage'][1], data['battery_current'][1],
+            data['load_voltage'][1], data['load_current'][1], data['load_power'][1],
+            data['pv_voltage'][1], data['pv_current'][1], data['pv_power'][1],
+        )
 
         #self.data.update(data)
         self.queueData(data)
@@ -623,8 +630,6 @@ class BtThBleakClient(BleakClientEx):
         #logging.info(f"parse_battery_info: -----------------------------------------------------------------")
         data = {}
         data['function'] = (0, FUNCTION.get(bytes_to_int(bs, 1, 1)), False)
-        data['battery_type_raw1'] = (0xe004, bytes_to_int(bs, 3+6, 2), False)            # 0xe004 - 0x03   
-        data['battery_type1'] = (0, BATTERY_TYPE.get(data['battery_type_raw1']), False)            # 0xe004 - 0x03   
         # there are 3 bytes ahead of payload, and documentation is in 2 byte words
         def bytes_to_int_offset(bytes, addr, length, scale=None):
             base = 0xe001
@@ -634,11 +639,20 @@ class BtThBleakClient(BleakClientEx):
         for name, addr, length, scale, editable in self.battery_info_registers:
             data[name] = (f"{addr:04x}", bytes_to_int_offset(bs, addr, length, scale=scale), editable)
 
-        data['battery_type'] = (0, BATTERY_TYPE.get(data['battery_type_raw']), True)           # 0xe004 - 0x03   
+        data['battery_type'] = (0, BATTERY_TYPE.get(data['battery_type_raw'][1]), True)           # 0xe004 - 0x03   
         data['end_of_discharge_soc'] = (0, (data['end_of'][1] & 0x7f) * 0.1, False)                # low byte
         data['end_of_charge_soc'] = (0, (data['end_of'][1] >> 8) * 0.1, False)                     # high byte
         data['system_voltage'] = (0, data['voltage_settings'][1] >> 8, True)                      # high byte
         data['recognized_voltage'] = (0, data['voltage_settings'][1] & 0x7f, False )               # low byte
+        logging.info(
+            "BATTERY_CFG transport=%s battery_type=%s raw=%s voltage_settings=0x%04x system_voltage=%s recognized_voltage=%s",
+            getattr(self, "device_name", ""),
+            data['battery_type'][1],
+            data['battery_type_raw'][1],
+            data['voltage_settings'][1],
+            data['system_voltage'][1],
+            data['recognized_voltage'][1],
+        )
         #self.data.update(data)
         #xreport('BtThBleakClient', self.device_name, f"parse_battery_info: {data}", yellow=True,)
         self.queueData(data)

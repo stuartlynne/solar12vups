@@ -393,7 +393,8 @@ class SolarMonitorApp:
         info_keys = [
             'device_nickname', 'device_name', 'model',
             'software_version', 'hardware_version', 'serial_number', 'controller_uid', 'transport_name',
-            'load_status', 'charging_status'
+            'load_status', 'charging_status', 'battery_type',
+            'system_voltage', 'recognized_voltage',
         ]
         info = self.info.setdefault(device_name, {k: '' for k in info_keys})
         xreport(device_name, 'device_notebook', f"Creating tabs for device: {device_name} with info: {info}", yellow=True)
@@ -591,15 +592,11 @@ class SolarMonitorApp:
                 self.update_device_status(device_name, data)
                 return
 
-        if device_name not in self.device_notebooks:
-            if TRACE_GUI_UPDATES:
-                logging.info("GUI:on_data_received dropping data before notebook ready device=%s keys=%s", device_name, list(data.keys()))
-            return
-
         info_keys = [
             'device_nickname', 'device_name', 'model',
             'software_version', 'hardware_version', 'serial_number', 'controller_uid', 'transport_name',
-            'load_status', 'charging_status'
+            'load_status', 'charging_status', 'battery_type',
+            'system_voltage', 'recognized_voltage',
         ]
         if device_name not in self.info:
             #self.info[device_name] = { 'device_nickname': '', 'device_name': '', 'model': '', 'load_status': 'off', 'charging_status': 'deactivated', }
@@ -609,9 +606,20 @@ class SolarMonitorApp:
             if key in data:
                 #logging.info(f"on_data_received: updating info {key} {data[key][1]}")
                 self.info[device_name][key] = data[key][1].strip() if isinstance(data[key][1], str) else data[key][1]
+                if key == 'battery_type':
+                    logging.info(
+                        "GUI:battery_type device=%s value=%r",
+                        device_name,
+                        self.info[device_name][key],
+                    )
             #xreport(device_name, 'on_data_received', f"info updated: {self.info[device_name]}", yellow=True)
         self._apply_controller_profile(device_name)
         self._refresh_device_container_title(device_name)
+
+        if device_name not in self.device_notebooks:
+            if TRACE_GUI_UPDATES:
+                logging.info("GUI:on_data_received dropping data before notebook ready device=%s keys=%s", device_name, list(data.keys()))
+            return
 
         devinfo = self.ensure_device_notebook(device_name)
         if not devinfo.get('static_ready'):

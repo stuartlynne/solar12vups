@@ -460,6 +460,8 @@ class PowerGaugeTab:
 
         self.close_button_bounds = [5.84,2.098,.10,.10]
         self.tooltip.add_tip_box(self.close_button_bounds, "Close this tab")
+        self.battery_type_bounds = [5.20, 0.21, .60, .10]
+        self.tooltip.add_tip_box(self.battery_type_bounds, "Click to change battery type")
 
         self.capacity_button_list = {
                 'capacity_down':  { 'arrow': '\u25BC', 'bounds': [5.20, 0.022, .08, .08], 'active': 'battery_capacity', 'up': False, },
@@ -502,7 +504,7 @@ class PowerGaugeTab:
             self._track_static_artist(self.ax.text(x + w / 2, y + h*.5, button['arrow'], ha='center', va='center', fontsize=6, weight='bold'))
 
         thermometer_label = self._track_static_artist(self.ax.text(
-            5.62, 0.98, "Ctl",
+            5.62, 0.98, "🌡",
             ha='center', va='center', fontsize=15, color='gray', fontfamily='Noto Sans Symbols2'
         ))
         self.tooltip.add_tip_artist(thermometer_label, "Internal Wanderer controller temperature; useful as a proxy, not ambient box air temperature")
@@ -769,6 +771,125 @@ class PowerGaugeTab:
     def popup_and_get_string(self, prompt="Please enter something"):
         return simpledialog.askstring("Prompt", prompt, parent=self.root)
 
+    def popup_battery_settings(self, current_type="", battery_capacity=8, batteries=1, system_voltage=12):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Battery Settings")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.configure(bg="#d9d9d9")
+
+        result = {"value": None}
+
+        body = tk.Frame(dialog, bg="#d9d9d9")
+        body.pack(fill="both", expand=True, padx=10, pady=10)
+
+        tk.Label(body, text="Battery Type", bg="#d9d9d9").grid(row=0, column=0, padx=4, pady=(4, 6), sticky="w")
+        type_var = tk.StringVar(value=(current_type or "lithium").lower())
+        type_combo = ttk.Combobox(
+            body,
+            textvariable=type_var,
+            values=["open", "sealed", "gel", "lithium", "custom"],
+            state="readonly",
+            width=12,
+        )
+        type_combo.grid(row=0, column=1, padx=4, pady=(4, 6), sticky="ew")
+
+        tk.Label(body, text="System Voltage", bg="#d9d9d9").grid(row=1, column=0, padx=4, pady=6, sticky="w")
+        voltage_var = tk.StringVar(value=str(system_voltage if system_voltage in (12, 24) else 12))
+        voltage_combo = ttk.Combobox(
+            body,
+            textvariable=voltage_var,
+            values=["12", "24"],
+            state="readonly",
+            width=12,
+        )
+        voltage_combo.grid(row=1, column=1, padx=4, pady=6, sticky="ew")
+
+        tk.Label(body, text="Battery Ah", bg="#d9d9d9").grid(row=2, column=0, padx=4, pady=6, sticky="w")
+        capacity_var = tk.StringVar(value=str(battery_capacity))
+        capacity_entry = tk.Entry(body, textvariable=capacity_var, width=12)
+        capacity_entry.grid(row=2, column=1, padx=4, pady=6, sticky="ew")
+
+        tk.Label(body, text="Batteries", bg="#d9d9d9").grid(row=3, column=0, padx=4, pady=6, sticky="w")
+        batteries_var = tk.StringVar(value=str(batteries))
+        batteries_entry = tk.Entry(body, textvariable=batteries_var, width=12)
+        batteries_entry.grid(row=3, column=1, padx=4, pady=6, sticky="ew")
+
+        error_var = tk.StringVar(value="")
+        error_label = tk.Label(body, textvariable=error_var, fg="red", bg="#d9d9d9")
+        error_label.grid(row=4, column=0, columnspan=2, padx=4, pady=(2, 6), sticky="w")
+
+        mapping = {
+            'open': 1,
+            'sealed': 2,
+            'gel': 3,
+            'lithium': 4,
+            'custom': 5,
+        }
+
+        def on_ok():
+            normalized = type_var.get().strip().lower()
+            if normalized not in mapping:
+                error_var.set("Select a valid battery type.")
+                return
+            try:
+                selected_voltage = int(voltage_var.get().strip())
+                capacity = int(capacity_var.get().strip())
+                count = int(batteries_var.get().strip())
+            except ValueError:
+                error_var.set("Voltage, Battery Ah and Batteries must be integers.")
+                return
+            if selected_voltage not in (12, 24):
+                error_var.set("System Voltage must be 12 or 24.")
+                return
+            if capacity < 1 or count < 1:
+                error_var.set("Battery Ah and Batteries must be >= 1.")
+                return
+            result["value"] = (normalized, mapping[normalized], selected_voltage, capacity, count)
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        buttons = tk.Frame(body, bg="#d9d9d9")
+        buttons.grid(row=5, column=0, columnspan=2, padx=4, pady=(0, 4), sticky="e")
+        tk.Button(buttons, text="Cancel", command=on_cancel).pack(side="right", padx=(6, 0))
+        tk.Button(buttons, text="OK", command=on_ok).pack(side="right")
+
+        body.columnconfigure(1, weight=1)
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+        dialog.update_idletasks()
+        try:
+            root_x = self.root.winfo_rootx()
+            root_y = self.root.winfo_rooty()
+            root_w = self.root.winfo_width()
+            root_h = self.root.winfo_height()
+            dlg_w = dialog.winfo_reqwidth()
+            dlg_h = dialog.winfo_reqheight()
+            x = root_x + max(0, (root_w - dlg_w) // 2)
+            y = root_y + max(0, (root_h - dlg_h) // 2)
+            dialog.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+        dialog.deiconify()
+        dialog.lift()
+        dialog.grab_set()
+        type_combo.focus_set()
+        self.root.wait_window(dialog)
+        return result["value"]
+
+    def popup_and_get_battery_type(self, current_value=""):
+        result = self.popup_battery_settings(
+            current_type=current_value,
+            battery_capacity=self.active.get('battery_capacity', 8),
+            batteries=self.active.get('batteries', 1),
+            system_voltage=int(self.info.get('system_voltage') or 12),
+        )
+        if result is None:
+            return None
+        normalized, mapping_value, system_voltage, capacity, batteries = result
+        return normalized, mapping_value, system_voltage, capacity, batteries
+
 
     def on_click(self, event):
         logging.info("PowerGauge:on_click: event=%s", event)
@@ -831,6 +952,31 @@ class PowerGaugeTab:
                         self._clear_highlight_after_id = self.root.after(3800, self.clear_highlight)
                 else:
                     logging.info("PowerGauge:on_click: Click outside load button")
+
+            if self.battery_type_bounds:
+                x, y, w, h = self.battery_type_bounds
+                if x <= event.xdata <= x + w and y <= event.ydata <= y + h:
+                    current_type = str(self.info.get('battery_type') or '').strip().lower()
+                    result = self.popup_and_get_battery_type(current_type)
+                    if result is not None:
+                        battery_type_name, battery_type_raw, system_voltage, battery_capacity, batteries = result
+                        self.info['battery_type'] = battery_type_name
+                        self.info['system_voltage'] = system_voltage
+                        self.active['battery_capacity'] = battery_capacity
+                        self.active['batteries'] = batteries
+                        if self.controlQueues and self.device_name.lower() in self.controlQueues:
+                            self.controlQueues[self.device_name.lower()].put(
+                                (self.device_name.lower(), 'set', 0xe004, 'battery_type_raw', battery_type_raw)
+                            )
+                            recognized_voltage = int(self.info.get('recognized_voltage') or 0) & 0x7f
+                            voltage_settings = ((int(system_voltage) & 0xff) << 8) | recognized_voltage
+                            self.controlQueues[self.device_name.lower()].put(
+                                (self.device_name.lower(), 'set', 0xe003, 'voltage_settings', voltage_settings)
+                            )
+                        if self._last_data_history is not None:
+                            self.update_gauges(self._last_data_history)
+                        else:
+                            self.render_static_placeholder()
 
             if self.close_button_bounds:
                 x, y, w, h = self.close_button_bounds
@@ -935,6 +1081,34 @@ class PowerGaugeTab:
             "Useful as a proxy only; not ambient box air temperature.\n"
             "Safe: 5C-39C\nWarning: 0C-4C or 40C-49C\nDanger: <0C or >=50C"
         )
+
+    def battery_type_display_text(self):
+        battery_type = str(self.info.get('battery_type') or '').strip()
+        system_voltage = self.info.get('system_voltage')
+        recognized_voltage = self.info.get('recognized_voltage')
+
+        label = battery_type.capitalize() if battery_type else ""
+        try:
+            system_voltage = int(system_voltage) if system_voltage not in ("", None) else 0
+        except Exception:
+            system_voltage = 0
+        try:
+            recognized_voltage = int(recognized_voltage) if recognized_voltage not in ("", None) else 0
+        except Exception:
+            recognized_voltage = 0
+
+        if system_voltage and recognized_voltage and recognized_voltage != system_voltage:
+            voltage_text = f"{system_voltage}/{recognized_voltage}V"
+        elif system_voltage:
+            voltage_text = f"{system_voltage}V"
+        elif recognized_voltage:
+            voltage_text = f"{recognized_voltage}V"
+        else:
+            voltage_text = ""
+
+        if label and voltage_text:
+            return f"{label} {voltage_text}"
+        return label or voltage_text
 
     def get_vcw(self, key, data_history):
         vcw = [data_history[f"{key}_{field}"][-1] for field in ("voltage", "current", )]
@@ -1233,8 +1407,17 @@ class PowerGaugeTab:
         self.tooltip.add_tip_artist(fault_text, FAULT_TOOLTIP_TABLE, fixedFont=True, name="fault-status")
 
         info_values = [
-            v for k, v in self.info.items()
-            if v and k not in ('device_nickname', 'status_text', 'status_level') and v != 'N/A' and v != ''
+            str(v) for k, v in self.info.items()
+            if v and k not in (
+                'device_nickname',
+                'status_text',
+                'status_level',
+                'battery_type',
+                'system_voltage',
+                'recognized_voltage',
+                'controller_uid',
+                'transport_name',
+            ) and v != 'N/A' and v != ''
         ]
         self._replace_dynamic_text_artist(
             '_info_line_artist',
@@ -1279,6 +1462,18 @@ class PowerGaugeTab:
         battery_capacity = self.active.get('battery_capacity', 8)
         batteries = self.active.get('batteries', 1)
         battery_button_str = f"{battery_capacity}Ah x{batteries}"
+        battery_type = self.battery_type_display_text()
+        logging.info("PowerGauge:battery_type device=%s value=%r", self.device_name, battery_type)
+        battery_type_artist = self._replace_dynamic_text_artist(
+            '_battery_type_artist',
+            5.50, 0.245,
+            battery_type,
+            ha='center', va='bottom', fontsize=8, weight='bold', color='#444444'
+        )
+        self.tooltip.add_tip_artist(
+            battery_type_artist,
+            "Battery type from E004.\nConfigured/recognized system voltage from E003.\nClick to change battery type and local battery sizing.",
+        )
         self.batteries_button = self._track_dynamic_artist(
             self.ax.text(5.50, 0.128, battery_button_str, ha='center', va='bottom', fontsize=10, weight='bold')
         )

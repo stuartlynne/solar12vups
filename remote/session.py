@@ -97,6 +97,7 @@ class RemoteBtThSession:
             {'name': 'Load State', 'register': 0x120, 'words': 8, 'parser': self.parse_load_state, 'modulus': [4, 0]},
             {'name': 'Device Info', 'register': 0x0a, 'words': 0x10, 'parser': self.parse_device_info, 'once': True},
             {'name': 'Device Address', 'register': 0x1a, 'words': 1, 'parser': self.parse_device_address, 'once': True},
+            {'name': 'Battery Config', 'register': 0xe003, 'words': 2, 'parser': self.parse_battery_config, 'once': True},
             {'name': 'History Info', 'register': 0x10b, 'words': 23, 'parser': self.parse_history_info, 'modulus': [4, 0]},
         ]
         if ENABLE_REMOTE_BATTERY_INFO:
@@ -184,7 +185,6 @@ class RemoteBtThSession:
         while not self.aevents.is_shutdown():
             try:
                 await self.read_registers("remote")
-                self.emit_status("Pico bridge connected. Wanderer responding.", level="ok")
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 raise
@@ -363,6 +363,13 @@ class RemoteBtThSession:
             data['battery_temperature'][1],
             data['controller_temperature'][1],
         )
+        logging.info(
+            "CHG_SUMMARY transport=%s batt=%0.1fV %0.2fA load=%0.1fV %0.2fA %0.1fW pv=%0.1fV %0.2fA %0.1fW",
+            self.bridge_name,
+            data['battery_voltage'][1], data['battery_current'][1],
+            data['load_voltage'][1], data['load_current'][1], data['load_power'][1],
+            data['pv_voltage'][1], data['pv_current'][1], data['pv_power'][1],
+        )
         self.queueData(data)
 
     def parse_load_state(self, bs):
@@ -412,6 +419,30 @@ class RemoteBtThSession:
         data['end_of_charge_soc'] = (0, (data['end_of'][1] >> 8) * 0.1, False)
         data['system_voltage'] = (0, data['voltage_settings'][1] >> 8, True)
         data['recognized_voltage'] = (0, data['voltage_settings'][1] & 0x7f, False)
+        self.queueData(data)
+
+    def parse_battery_config(self, bs):
+        data = {}
+        data['function'] = (0, FUNCTION.get(bytes_to_int(bs, 1, 1)), False)
+
+        def bytes_to_int_offset(blob, addr, length, scale=None):
+            base = 0xe003
+            offset = (addr - base) * 2 + 3
+            return bytes_to_int(blob, offset, length, scale=scale)
+
+        data['voltage_settings'] = ('e003', bytes_to_int_offset(bs, 0xe003, 2), True)
+        data['battery_type_raw'] = ('e004', bytes_to_int_offset(bs, 0xe004, 2), True)
+        data['battery_type'] = (0, BATTERY_TYPE.get(data['battery_type_raw'][1], f"unknown:{data['battery_type_raw'][1]}"), True)
+        data['system_voltage'] = (0, data['voltage_settings'][1] >> 8, True)
+        data['recognized_voltage'] = (0, data['voltage_settings'][1] & 0x7f, False)
+        logging.info(
+            "BATTERY_CFG transport=%s battery_type=%s raw=%s system_voltage=%s recognized_voltage=%s",
+            self.bridge_name,
+            data['battery_type'][1],
+            data['battery_type_raw'][1],
+            data['system_voltage'][1],
+            data['recognized_voltage'][1],
+        )
         self.queueData(data)
 
     async def set_register(self, register, value):
