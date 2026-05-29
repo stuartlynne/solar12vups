@@ -11,10 +11,12 @@ import matplotlib
 matplotlib.use('TkAgg')
 import os
 from app import install_desktop as desktop_installer
+from version import __version__
 
 
 def main():
     parser = argparse.ArgumentParser(description="Solar12VUPS runner")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--stderr", action="store_true", help="Enable console logging to stderr")
     parser.add_argument("--add-desktop-icon", action="store_true",
                         help="Create a Desktop shortcut and optional menu entry.\n"
