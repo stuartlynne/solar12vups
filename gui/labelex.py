@@ -17,6 +17,7 @@ class LabelEditEx(ttk.LabelFrame):
         self.description = description
         self.callback = callback
         self.entry = None
+        self.value_widget = None
         self._editing = False
 
         self._pending_description = description
@@ -72,8 +73,10 @@ class LabelEditEx(ttk.LabelFrame):
                     self.entry = tk.Entry(self.frame, font=("TkDefaultFont", 10), justify="center")
                     self.entry.insert(0, str(value))
                     self.entry.pack(fill="x", padx=4, pady=2)
+                    self.value_widget = self.entry
                 else:
-                    ttk.Label(self.frame, text=str(value), anchor="center").pack(fill="x", padx=4, pady=2)
+                    self.value_widget = ttk.Label(self.frame, text=str(value), anchor="center")
+                    self.value_widget.pack(fill="x", padx=4, pady=2)
 
                 ttk.Label(self, text=self.description, font=("TkDefaultFont", 8), anchor="e").pack(anchor="e", padx=4, pady=(2, 0))
 
@@ -87,9 +90,10 @@ class LabelEditEx(ttk.LabelFrame):
                     self.entry = tk.Entry(self.frame, font=("TkDefaultFont", 10), justify="center")
                     self.entry.insert(0, str(value))
                     self.entry.grid(row=0, column=1, sticky="ew", padx=(2, 4))
+                    self.value_widget = self.entry
                 else:
-                    ttk.Label(self.frame, text=str(value), anchor="center") \
-                        .grid(row=0, column=1, sticky="ew", padx=(2, 4))
+                    self.value_widget = ttk.Label(self.frame, text=str(value), anchor="center")
+                    self.value_widget.grid(row=0, column=1, sticky="ew", padx=(2, 4))
             if self.entry:
                 #logging.info(f"Binding entry to callback {self.callback}")
                 self.entry.bind("<KeyRelease>", self.key_release)
@@ -129,3 +133,15 @@ class LabelEditEx(ttk.LabelFrame):
             return self.entry.get()
         return None
 
+    def set_value_style(self, changed=False):
+        color = "#b24a00" if changed else "black"
+        widget = self.value_widget
+        if widget is None:
+            return
+        try:
+            if isinstance(widget, tk.Entry):
+                widget.configure(fg=color)
+            else:
+                widget.configure(foreground=color)
+        except Exception:
+            pass

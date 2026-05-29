@@ -18,6 +18,13 @@ class HistoryTab:
         ("60m", 60),
         ("120m", 120),
     ]
+    MAX_REASONABLE = {
+        'pv_voltage': 80.0,
+        'battery_voltage': 40.0,
+        'load_voltage': 40.0,
+        'pv_current': 100.0,
+        'load_current': 100.0,
+    }
 
     def __init__(self, device_name=None, tab_control=None, text="History"):
         self.device_name = device_name
@@ -71,6 +78,28 @@ class HistoryTab:
                 times.append(item)
         return times
 
+    def _sanitize_series(self, key, values):
+        max_reasonable = self.MAX_REASONABLE.get(key)
+        if max_reasonable is None:
+            return values
+        sanitized = []
+        last_good = None
+        for value in values:
+            if value is None:
+                sanitized.append(last_good if last_good is not None else 0)
+                continue
+            try:
+                numeric = float(value)
+            except Exception:
+                sanitized.append(last_good if last_good is not None else 0)
+                continue
+            if numeric < 0 or numeric > max_reasonable:
+                sanitized.append(last_good if last_good is not None else 0)
+                continue
+            sanitized.append(numeric)
+            last_good = numeric
+        return sanitized
+
     def _render_empty(self):
         self.ax.clear()
         self.ax_right.clear()
@@ -97,6 +126,7 @@ class HistoryTab:
 
         pv_to_load = []
         batt_to_load = []
+        pv_to_batt = []
         power = Power(name=f"{self.device_name}-history")
 
         for i in range(n):
@@ -111,8 +141,13 @@ class HistoryTab:
             _ = state
             pv_to_load.append(power.load.from_pvps_w or 0)
             batt_to_load.append(power.load.from_batt_w or 0)
+            # Approximate charging-side battery power as PV/PS power less the
+            # portion of load supplied by PV/PS. This matches the app's
+            # inferred flow model rather than a direct controller channel.
+            pv_power = (pv_v[i] or 0) * (pv_a[i] or 0)
+            pv_to_batt.append(max(0.0, pv_power - (power.load.from_pvps_w or 0)))
 
-        return pv_to_load, batt_to_load
+        return pv_to_load, batt_to_load, pv_to_batt
 
     def _bar_width_days(self, times):
         if len(times) >= 2:
@@ -132,10 +167,10 @@ class HistoryTab:
             self._render_empty()
             return
 
-        pv = list(data_history.get('pv_voltage', []))
-        batt = list(data_history.get('battery_voltage', []))
-        load_v = list(data_history.get('load_voltage', []))
-        load_a = list(data_history.get('load_current', []))
+        pv = self._sanitize_series('pv_voltage', list(data_history.get('pv_voltage', [])))
+        batt = self._sanitize_series('battery_voltage', list(data_history.get('battery_voltage', [])))
+        load_v = self._sanitize_series('load_voltage', list(data_history.get('load_voltage', [])))
+        load_a = self._sanitize_series('load_current', list(data_history.get('load_current', [])))
 
         n = min(len(times), len(pv), len(batt), len(load_v), len(load_a))
         if n <= 0:
@@ -147,7 +182,7 @@ class HistoryTab:
         batt = batt[-n:]
         load_v = load_v[-n:]
         load_a = load_a[-n:]
-        pv_a = list(data_history.get('pv_current', []))[-n:]
+        pv_a = self._sanitize_series('pv_current', list(data_history.get('pv_current', [])))[-n:]
 
         cutoff = times[-1] - timedelta(minutes=self._selected_minutes())
         start_idx = 0
@@ -166,7 +201,7 @@ class HistoryTab:
             self._render_empty()
             return
 
-        pv_to_load_w, batt_to_load_w = self._derive_load_components(
+        pv_to_load_w, batt_to_load_w, pv_to_batt_w = self._derive_load_components(
             {
                 'pv_voltage': pv,
                 'pv_current': pv_a,
@@ -209,9 +244,18 @@ class HistoryTab:
             zorder=1,
             label="Load from Battery",
         )
+        pv_to_batt_line, = self.ax_right.plot(
+            times,
+            pv_to_batt_w,
+            color="#1f77b4",
+            linewidth=1.4,
+            alpha=0.9,
+            zorder=4,
+            label="PV/PS to Battery",
+        )
         self.ax.grid(True, alpha=0.25)
-        legend_handles = [self.ax.get_lines()[0], self.ax.get_lines()[1], pv_bars, batt_bars]
-        legend_labels = ["PV/PS Voltage", "Battery Voltage", "Load from PV/PS", "Load from Battery"]
+        legend_handles = [self.ax.get_lines()[0], self.ax.get_lines()[1], pv_bars, batt_bars, pv_to_batt_line]
+        legend_labels = ["PV/PS Voltage", "Battery Voltage", "Load from PV/PS", "Load from Battery", "PV/PS to Battery"]
         self.ax.legend(legend_handles, legend_labels, loc="upper left")
         self.ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
         self.figure.autofmt_xdate(rotation=20, ha="right")

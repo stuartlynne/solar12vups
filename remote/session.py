@@ -24,7 +24,12 @@ from lib.log import xreport
 
 logger = logging.getLogger(__name__)
 
-ENABLE_REMOTE_BATTERY_INFO = False
+# Read the charging-settings block on startup and during periodic identity
+# refresh sweeps so Pico-backed devices can populate the Settings tab without
+# polling it on every live telemetry cycle. Some controllers return bad CRCs
+# for the larger E001.. battery-info block, so use the smaller E005..E013
+# range that the Settings tab actually needs.
+ENABLE_REMOTE_CHARGING_SETTINGS = True
 REMOTE_IDENTITY_REFRESH_INTERVAL = 30
 
 
@@ -76,6 +81,23 @@ class RemoteBtThSession:
         ('load_working_mode', 0xe01d, 2, 1, True),
         ('special_power_control', 0xe021, 2, 1, True),
     ]
+    charging_settings_registers = [
+        ('over_voltage_threshold', 0xe005, 2, .1, True),
+        ('charging_voltage_limit', 0xe006, 2, .1, True),
+        ('equalizing_charging_voltage', 0xe007, 2, .1, True),
+        ('boost_charging_voltage', 0xe008, 2, .1, True),
+        ('floating_charging_voltage', 0xe009, 2, .1, True),
+        ('boost_charging_recovery_voltage', 0xe00a, 2, .1, True),
+        ('over_discharge_recovery_voltage', 0xe00b, 2, .1, True),
+        ('under_voltage_warning_level', 0xe00c, 2, .1, True),
+        ('over_discharge_voltage', 0xe00d, 2, .1, True),
+        ('discharge_limit_voltage', 0xe00e, 2, .1, True),
+        ('end_of', 0xe00f, 2, 1, False),
+        ('over_discharge_time_delay', 0xe010, 2, 1, True),
+        ('equalizing_charging_interval', 0xe011, 2, 1, True),
+        ('boost_charging_time', 0xe012, 2, 1, True),
+        ('equalizing_charging_time', 0xe013, 2, 1, True),
+    ]
 
     def __init__(self, bridge_name, hub, aevents=None, controlQueue=None, dataQueue=None):
         self.bridge_name = bridge_name
@@ -100,9 +122,9 @@ class RemoteBtThSession:
             {'name': 'Battery Config', 'register': 0xe003, 'words': 2, 'parser': self.parse_battery_config, 'once': True},
             {'name': 'History Info', 'register': 0x10b, 'words': 23, 'parser': self.parse_history_info, 'modulus': [4, 0]},
         ]
-        if ENABLE_REMOTE_BATTERY_INFO:
+        if ENABLE_REMOTE_CHARGING_SETTINGS:
             self.registers.append(
-                {'name': 'Battery Info', 'register': 0xe001, 'words': 40, 'parser': self.parse_battery_info, 'modulus': [4, 2]}
+                {'name': 'Charging Settings', 'register': 0xe005, 'words': 15, 'parser': self.parse_charging_settings, 'modulus': [4, 2]}
             )
 
     def queueData(self, data):
@@ -442,6 +464,32 @@ class RemoteBtThSession:
             data['battery_type_raw'][1],
             data['system_voltage'][1],
             data['recognized_voltage'][1],
+        )
+        self.queueData(data)
+
+    def parse_charging_settings(self, bs):
+        data = {}
+        data['function'] = (0, FUNCTION.get(bytes_to_int(bs, 1, 1)), False)
+
+        def bytes_to_int_offset(blob, addr, length, scale=None):
+            base = 0xe005
+            offset = (addr - base) * 2 + 3
+            return bytes_to_int(blob, offset, length, scale=scale)
+
+        for name, addr, length, scale, editable in self.charging_settings_registers:
+            data[name] = (f"{addr:04x}", bytes_to_int_offset(bs, addr, length, scale=scale), editable)
+
+        if 'end_of' in data:
+            data['end_of_discharge_soc'] = (0, (data['end_of'][1] & 0x7f) * 0.1, False)
+            data['end_of_charge_soc'] = (0, (data['end_of'][1] >> 8) * 0.1, False)
+
+        logging.info(
+            "CHG_SETTINGS transport=%s e005=%s e006=%s e00c=%s e012=%s",
+            self.bridge_name,
+            data['over_voltage_threshold'][1],
+            data['charging_voltage_limit'][1],
+            data['under_voltage_warning_level'][1],
+            data['boost_charging_time'][1],
         )
         self.queueData(data)
 

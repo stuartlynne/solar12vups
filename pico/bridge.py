@@ -48,6 +48,18 @@ def connect_wifi():
     debug("wifi activate")
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
+    try:
+        scan_results = wlan.scan()
+        ssids = []
+        for entry in scan_results:
+            try:
+                ssid = entry[0].decode("utf-8", errors="replace")
+            except Exception:
+                ssid = str(entry[0])
+            ssids.append(ssid)
+        debug("wifi scan ssids={}".format(ssids))
+    except Exception as exc:
+        debug("wifi scan failed {}".format(exc))
     if CONFIG.get("wifi_static_ip"):
         debug("wifi static ip {}".format(CONFIG["wifi_static_ip"]))
         wlan.ifconfig((
@@ -63,11 +75,23 @@ def connect_wifi():
     debug("wifi connect ssid={}".format(CONFIG["wifi_ssid"]))
     wlan.connect(CONFIG["wifi_ssid"], CONFIG["wifi_password"])
     deadline = time.ticks_add(time.ticks_ms(), CONFIG.get("wifi_timeout_s", 20) * 1000)
+    last_status = None
     while not wlan.isconnected():
+        try:
+            status = wlan.status()
+        except Exception:
+            status = None
+        if status != last_status:
+            debug("wifi status {}".format(status))
+            last_status = status
         if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
-            raise OSError("wifi connect timeout")
+            raise OSError("wifi connect timeout status={}".format(status))
         time.sleep_ms(250)
-    debug("wifi connected {}".format(wlan.ifconfig()))
+    try:
+        status = wlan.status()
+    except Exception:
+        status = None
+    debug("wifi connected status={} {}".format(status, wlan.ifconfig()))
     return wlan
 
 

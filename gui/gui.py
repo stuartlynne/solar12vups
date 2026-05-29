@@ -27,6 +27,57 @@ logger = logging.getLogger(__name__)
 TRACE_GUI_UPDATES = False
 USE_SIMPLE_DEVICE_PLACEHOLDER = False
 MAX_HISTORY_SAMPLES = 4000
+PROFILE_WRITE_COOLDOWN_SECONDS = 4.0
+
+LIFEPO4_PROFILE_NAME = "LiFePO4"
+LIFEPO4_PROFILE_TARGETS = {
+    'battery_type': 'lithium',
+    'system_voltage': 12,
+    'charging_voltage_limit': 14.5,
+    'boost_charging_voltage': 14.2,
+    'floating_charging_voltage': 13.8,
+    'boost_charging_recovery_voltage': 13.2,
+    'over_discharge_recovery_voltage': 12.5,
+    'under_voltage_warning_level': 12.0,
+    'over_discharge_voltage': 11.0,
+    'discharge_limit_voltage': 10.8,
+    'over_discharge_time_delay': 5,
+    'equalizing_charging_interval': 0,
+    'boost_charging_time': 120,
+    'equalizing_charging_time': 0,
+}
+SETTING_REGISTERS = {
+    'over_voltage_threshold': 0xe005,
+    'charging_voltage_limit': 0xe006,
+    'equalizing_charging_voltage': 0xe007,
+    'boost_charging_voltage': 0xe008,
+    'floating_charging_voltage': 0xe009,
+    'boost_charging_recovery_voltage': 0xe00a,
+    'over_discharge_recovery_voltage': 0xe00b,
+    'under_voltage_warning_level': 0xe00c,
+    'over_discharge_voltage': 0xe00d,
+    'discharge_limit_voltage': 0xe00e,
+    'over_discharge_time_delay': 0xe010,
+    'equalizing_charging_interval': 0xe011,
+    'boost_charging_time': 0xe012,
+    'equalizing_charging_time': 0xe013,
+}
+SETTING_SCALES = {
+    'over_voltage_threshold': 0.1,
+    'charging_voltage_limit': 0.1,
+    'equalizing_charging_voltage': 0.1,
+    'boost_charging_voltage': 0.1,
+    'floating_charging_voltage': 0.1,
+    'boost_charging_recovery_voltage': 0.1,
+    'over_discharge_recovery_voltage': 0.1,
+    'under_voltage_warning_level': 0.1,
+    'over_discharge_voltage': 0.1,
+    'discharge_limit_voltage': 0.1,
+    'over_discharge_time_delay': 1,
+    'equalizing_charging_interval': 1,
+    'boost_charging_time': 1,
+    'equalizing_charging_time': 1,
+}
 
 # Setup logging
 #logging.basicConfig(level=logging.INFO)
@@ -335,7 +386,12 @@ class SolarMonitorApp:
         key = self._controller_profile_key(info)
         if not key:
             return
-        controller_profile = self.active.setdefault('controllers', {}).get(key, {})
+        controllers = self.active.setdefault('controllers', {})
+        controller_profile = controllers.setdefault(key, {})
+        controller_profile.setdefault('battery_profile', LIFEPO4_PROFILE_NAME)
+        controller_profile.setdefault('renogy_defaults', {})
+        controller_profile.setdefault('model', str(info.get('model') or '').strip())
+        controller_profile.setdefault('controller_uid', str(info.get('controller_uid') or info.get('serial_number') or '').strip())
         nickname = str(controller_profile.get('device_nickname') or '').strip()
         if not nickname:
             return
@@ -354,6 +410,135 @@ class SolarMonitorApp:
             profile['device_nickname'] = nickname
             profile['model'] = str(info.get('model') or '').strip()
             profile['controller_uid'] = str(info.get('controller_uid') or info.get('serial_number') or '').strip()
+            profile.setdefault('battery_profile', LIFEPO4_PROFILE_NAME)
+            profile.setdefault('renogy_defaults', {})
+
+    def _get_controller_profile(self, device_name):
+        info = self.info.get(device_name, {})
+        key = self._controller_profile_key(info)
+        if not key:
+            return None
+        controllers = self.active.setdefault('controllers', {})
+        profile = controllers.setdefault(key, {})
+        profile.setdefault('battery_profile', LIFEPO4_PROFILE_NAME)
+        profile.setdefault('renogy_defaults', {})
+        profile['model'] = str(info.get('model') or '').strip()
+        profile['controller_uid'] = str(info.get('controller_uid') or info.get('serial_number') or '').strip()
+        return profile
+
+    def _capture_renogy_defaults(self, device_name, data):
+        profile = self._get_controller_profile(device_name)
+        if not profile:
+            return
+        defaults = profile.setdefault('renogy_defaults', {})
+        tracked_keys = {'battery_type', 'system_voltage'} | set(SETTING_REGISTERS.keys())
+        changed = False
+        for key in tracked_keys:
+            if key not in defaults and key in data:
+                value = data[key][1]
+                if isinstance(value, str):
+                    value = value.strip()
+                defaults[key] = value
+                changed = True
+        if changed and device_name in self.device_notebooks:
+            self.device_notebooks[device_name]['settings_tab'].set_default_values(defaults)
+
+    def _profile_target_map(self, device_name):
+        profile = self._get_controller_profile(device_name)
+        if not profile:
+            return None
+        battery_profile = str(profile.get('battery_profile') or LIFEPO4_PROFILE_NAME).strip()
+        if battery_profile == LIFEPO4_PROFILE_NAME:
+            return LIFEPO4_PROFILE_TARGETS
+        return None
+
+    def _values_differ(self, expected, actual):
+        if actual is None or actual == '':
+            return False
+        if isinstance(expected, str):
+            return str(actual).strip().lower() != expected.strip().lower()
+        try:
+            return abs(float(actual) - float(expected)) > 0.05
+        except Exception:
+            return actual != expected
+
+    def _queue_device_write(self, device_name, register, description, value):
+        control_queue = self.controlQueues.get(device_name.lower()) if self.controlQueues else None
+        if control_queue is None:
+            return False
+        if description == 'battery_type_raw':
+            scaled_value = int(value)
+        elif description == 'voltage_settings':
+            scaled_value = int(value)
+        else:
+            scale = SETTING_SCALES.get(description, 1)
+            try:
+                scaled_value = int(round(float(value) / float(scale)))
+            except Exception:
+                scaled_value = value
+        control_queue.put((device_name.lower(), 'set', register, description, scaled_value))
+        return True
+
+    def _maybe_apply_battery_profile(self, device_name, data):
+        targets = self._profile_target_map(device_name)
+        if not targets:
+            return
+        info = self.info.get(device_name, {})
+        device_state = self.active.setdefault('devices', {}).setdefault(device_name, {})
+        profile_sync = device_state.setdefault('profile_sync', {})
+        now = time.time()
+        last_write_at = float(profile_sync.get('last_write_at') or 0.0)
+        if now - last_write_at < PROFILE_WRITE_COOLDOWN_SECONDS:
+            return
+
+        battery_type = str(info.get('battery_type') or '').strip().lower()
+        if battery_type and self._values_differ(targets['battery_type'], battery_type):
+            if self._queue_device_write(device_name, 0xe004, 'battery_type_raw', 4):
+                profile_sync['last_write_at'] = now
+                profile_sync['last_write_key'] = 'battery_type'
+            return
+
+        system_voltage = info.get('system_voltage')
+        recognized_voltage = info.get('recognized_voltage')
+        if system_voltage not in ('', None) and self._values_differ(targets['system_voltage'], system_voltage):
+            try:
+                recognized_voltage_int = int(recognized_voltage or 0) & 0x7f
+                voltage_settings = ((int(targets['system_voltage']) & 0xff) << 8) | recognized_voltage_int
+                if self._queue_device_write(device_name, 0xe003, 'voltage_settings', voltage_settings):
+                    profile_sync['last_write_at'] = now
+                    profile_sync['last_write_key'] = 'system_voltage'
+            except Exception:
+                pass
+            return
+
+        ordered_setting_keys = [
+            'charging_voltage_limit',
+            'boost_charging_voltage',
+            'floating_charging_voltage',
+            'boost_charging_recovery_voltage',
+            'over_discharge_recovery_voltage',
+            'under_voltage_warning_level',
+            'over_discharge_voltage',
+            'discharge_limit_voltage',
+            'over_discharge_time_delay',
+            'equalizing_charging_interval',
+            'boost_charging_time',
+            'equalizing_charging_time',
+        ]
+        for key in ordered_setting_keys:
+            if key not in data:
+                continue
+            current_value = data[key][1]
+            expected_value = targets.get(key)
+            if expected_value is None or not self._values_differ(expected_value, current_value):
+                continue
+            register = SETTING_REGISTERS.get(key)
+            if register is None:
+                continue
+            if self._queue_device_write(device_name, register, key, expected_value):
+                profile_sync['last_write_at'] = now
+                profile_sync['last_write_key'] = key
+            return
 
     def _refresh_device_container_title(self, device_name):
         devinfo = self.device_notebooks.get(device_name)
@@ -443,6 +628,9 @@ class SolarMonitorApp:
                  0xe00b,0xe00d,0xe00e, 0xe010,
         ]
         settings_tab = SettingsTab(device_name=device_name, tab_control=notebook, addrRange=chargingSettings, text="Settings", )
+        controller_profile = self._get_controller_profile(device_name)
+        if controller_profile:
+            settings_tab.set_default_values(controller_profile.get('renogy_defaults', {}))
         values_tab = SettingsTab(
             device_name=device_name,
             tab_control=notebook,
@@ -615,6 +803,8 @@ class SolarMonitorApp:
             #xreport(device_name, 'on_data_received', f"info updated: {self.info[device_name]}", yellow=True)
         self._apply_controller_profile(device_name)
         self._refresh_device_container_title(device_name)
+        self._capture_renogy_defaults(device_name, data)
+        self._maybe_apply_battery_profile(device_name, data)
 
         if device_name not in self.device_notebooks:
             if TRACE_GUI_UPDATES:
@@ -689,7 +879,13 @@ class SolarMonitorApp:
             devinfo['history_tab'].update_history(data_history)
         if any(item[0] in devinfo['values_tab'].widgets for item in data.values() if isinstance(item, tuple) and len(item) >= 1):
             devinfo['values_tab'].update_tab_display(data=data, msg="Operating Values")
-        if 'voltage_settings' in data:
+        if any(
+            isinstance(item, tuple) and len(item) >= 1 and item[0] in devinfo['settings_tab'].widgets
+            for item in data.values()
+        ):
+            controller_profile = self._get_controller_profile(device_name)
+            if controller_profile:
+                devinfo['settings_tab'].set_default_values(controller_profile.get('renogy_defaults', {}))
             devinfo['settings_tab'].update_tab_display(data=data, msg="Settings" )
 
 

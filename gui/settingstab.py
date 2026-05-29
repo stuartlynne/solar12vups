@@ -38,6 +38,7 @@ class SettingsTab:
         self.addrRange = addrRange
         self.controlQueue = controlQueue
         self.labels = labels or {}
+        self.default_values = {}
 
         # Create a Frame as tab for this tab_control (notebook)
         self.tab = ttk.Frame(self.tab_control)
@@ -132,6 +133,9 @@ class SettingsTab:
                 addr, value, editable = data[k]
                 #def set_text(self, description=None, addr=None, value=None, editable=False):
                 self.widgets[v].set_text(description=k, value=value, editable=editable)
+                default_value = self.default_values.get(k, None)
+                changed = default_value is not None and default_value != value
+                self.widgets[v].set_value_style(changed=changed)
                 #if editable:
                 #    widget.set_editable(True)
                 #    widget.set_value(value)
@@ -141,4 +145,7 @@ class SettingsTab:
             logging.error(f"update_tab_display[{msg}] error: {e}")
             logging.error(traceback.format_exc())
             pass
+
+    def set_default_values(self, default_values=None):
+        self.default_values = dict(default_values or {})
             
