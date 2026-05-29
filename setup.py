@@ -12,11 +12,18 @@ setup(
     description="Solar-powered UPS monitor with BLE support and real-time GUI",
     author="Stuart Lynne",
     author_email="stuart.lynne@gmail.com",
-    packages=find_packages(include=["app*", "ble*", "lib*", "gui*", "remote*"]),
+    packages=find_packages(include=["app*", "ble*", "lib*", "gui*", "remote*", "pico*", "tools*"]),
     py_modules=["solar_runner"],
     install_requires=[
         "tabulate"
     ],
+    package_data={
+        "pico": [
+            "Makefile",
+            "bridge_config.py.example",
+            "*.md",
+        ],
+    },
     data_files=[
         ("share/solar12vups", [
             "favicon.png",
