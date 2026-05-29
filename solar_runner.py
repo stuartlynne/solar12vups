@@ -5,13 +5,25 @@
 """Convenience wrapper for running bootstrap directly from source tree."""
 import sys
 import argparse
+from importlib.metadata import PackageNotFoundError, version as package_version
 from lib.log import setup_logger
 from app.solar12vups import SolarMain
 import matplotlib
 matplotlib.use('TkAgg')
 import os
 from app import install_desktop as desktop_installer
-from version import __version__
+
+version_path = os.path.join(os.path.dirname(__file__), "version.py")
+if os.path.exists(version_path):
+    version_ns = {}
+    with open(version_path) as f:
+        exec(f.read(), version_ns)
+    __version__ = version_ns["__version__"]
+else:
+    try:
+        __version__ = package_version("solar12vups")
+    except PackageNotFoundError:
+        __version__ = "unknown"
 
 
 def main():
